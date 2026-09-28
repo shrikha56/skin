@@ -44,6 +44,18 @@ const types = {
   '.md': 'text/markdown; charset=utf-8',
 };
 
+// Which commit is being served, so it's easy to confirm an update landed.
+function version() {
+  try {
+    const head = readFileSync(join(root, '.git', 'HEAD'), 'utf8').trim();
+    const ref = head.startsWith('ref: ') ? head.slice(5) : null;
+    const sha = ref ? readFileSync(join(root, '.git', ref), 'utf8').trim() : head;
+    return `version ${sha.slice(0, 7)}${ref ? ` on ${ref.replace('refs/heads/', '')}` : ''}`;
+  } catch {
+    return 'version unknown';
+  }
+}
+
 const inflight = new Map();
 let warnedTts = false;
 
@@ -104,7 +116,7 @@ const server = createServer(async (req, res) => {
   if (!file.startsWith(root) || /[\\/]\.(env|git|cache)([\\/]|$)/.test(file.slice(root.length))) { res.writeHead(403).end('Forbidden'); return; }
   try {
     const body = await readFile(file);
-    res.writeHead(200, { 'Content-Type': types[extname(file)] ?? 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.writeHead(200, { 'Content-Type': types[extname(file)] ?? 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(body);
   } catch {
     res.writeHead(404).end('Not found');
@@ -124,7 +136,7 @@ function listen(p, attemptsLeft = 20) {
   server.listen(p, host);
 }
 server.once('listening', () => {
-  console.log(`\nCrimson Confession is running at http://localhost:${server.address().port}`);
+  console.log(`\nCrimson Confession (${version()}) is running at http://localhost:${server.address().port}`);
   console.log(apiKey ? `Voices: ON (ElevenLabs, model ${model})` : 'Voices: off (add ELEVENLABS_API_KEY=... to a .env file to turn them on)');
   console.log('(press Ctrl+C to stop)');
 });
