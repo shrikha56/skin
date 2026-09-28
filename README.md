@@ -13,7 +13,7 @@ npm start            # zero-dependency Node server (tools/serve.js)
 # open http://localhost:8000
 ```
 
-Any static server works (`npx serve`, VS Code Live Server, …).
+If port 8000 is taken, the server moves to the next free port and prints the URL. Any static server works (`npx serve`, VS Code Live Server, …).
 
 ## Test it
 

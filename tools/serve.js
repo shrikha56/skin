@@ -19,7 +19,7 @@ const types = {
   '.md': 'text/markdown; charset=utf-8',
 };
 
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   let path = decodeURIComponent(url.pathname);
   if (path.endsWith('/')) path += 'index.html';
@@ -32,6 +32,21 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(404).end('Not found');
   }
-}).listen(port, () => {
-  console.log(`Crimson Confession is running at http://localhost:${port}`);
 });
+
+// If the port is taken (another dev server, a FastAPI app, …), try the next one.
+function listen(p, attemptsLeft = 20) {
+  server.once('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
+      console.log(`Port ${p} is busy, trying ${p + 1}…`);
+      listen(p + 1, attemptsLeft - 1);
+    } else {
+      throw err;
+    }
+  });
+  server.listen(p);
+}
+server.once('listening', () => {
+  console.log(`\nCrimson Confession is running at http://localhost:${server.address().port}\n(press Ctrl+C to stop)`);
+});
+listen(port);
