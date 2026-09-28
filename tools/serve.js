@@ -6,7 +6,9 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const port = Number(process.argv[2] || process.env.PORT || 8000);
+// Ignore anything that isn't a valid port (e.g. a pasted "# comment" in zsh).
+const validPort = (v) => (/^\d+$/.test(String(v ?? '')) && Number(v) > 0 && Number(v) < 65536 ? Number(v) : null);
+const port = validPort(process.argv[2]) ?? validPort(process.env.PORT) ?? 8000;
 const types = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
