@@ -95,7 +95,7 @@ function showPanel(b) {
         ${portraitSVG(c.id, c.expr, { dead: c.expr === 'dead' })}
         <span class="subname">${esc(CHAR_BY_ID[c.id].short)}</span>
       </div>`).join('')
-    : `<div class="subpanel empty"><div class="speedlines"></div><span class="panel-glyph">${icon(b.icon ? ITEMS[b.icon]?.icon ?? b.icon : PANEL_GLYPHS[b.mood] ?? 'star')}</span></div>`;
+    : `<div class="subpanel empty"><div class="speedlines"></div><span class="panel-glyph" aria-hidden="true">${b.icon ? icon(ITEMS[b.icon]?.icon ?? b.icon) : PANEL_GLYPHS[b.mood] ?? '✦'}</span></div>`;
   cinema.innerHTML = `
     <div class="webtoon mood-${esc(b.mood)} cast-${Math.min(cast.length, 6)}" style="${b.color ? `--role:${b.color}` : ''}">
       <div class="panel-grid">${panels}</div>
@@ -115,7 +115,8 @@ function showPanel(b) {
   return wait();
 }
 
-const PANEL_GLYPHS = { night: 'moon', dark: 'candle', morning: 'sun', shock: 'alert', crimson: 'rose', trial: 'scales', pink: 'heart', neutral: 'star', role: 'key' };
+// Big panel illustrations stay emoji: they read as painted spot art at this size.
+const PANEL_GLYPHS = { night: '🌙', dark: '🕯️', morning: '☀️', shock: '❗', crimson: '🥀', trial: '⚖️', pink: '💗', neutral: '✦', role: '🗝️' };
 
 // Animated stab: the killer lunges, the knife swings, a slash tears across the
 // panel, blood splatters, and the victim crumples. Cartoon webtoon style.
