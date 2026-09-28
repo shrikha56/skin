@@ -15,6 +15,26 @@ npm start            # zero-dependency Node server (tools/serve.js)
 
 If port 8000 is taken, the server moves to the next free port and prints the URL. Any static server works (`npx serve`, VS Code Live Server, …).
 
+## Play with friends (multiplayer)
+
+Crimson Confession supports **2–6 people** in one match. Every match has 6 students, and **bots fill any empty seats**, so 2 friends plus 4 bots works as well as a full room of 6. Single-player is still there: pick **Play solo** on the title screen.
+
+**Same Wi-Fi (easiest):**
+```bash
+npm run host
+```
+The terminal prints an address like `http://192.168.1.23:8000`. Everyone opens it, chooses **Play with friends**, and one person clicks **Create room**. Share the 4-letter code or the invite link, pick your students, and the host clicks **Start the match**.
+
+**Friends somewhere else:** run `npm run host`, then expose it with a tunnel, for example `cloudflared tunnel --url http://localhost:8000`, and share the https link it prints.
+
+How multiplayer plays differently:
+- **Simultaneous turns.** Everyone picks their action privately; the turn resolves when all living players are ready, or when the timer runs out (the host can change timers in the lobby, or skip one).
+- **Real conversation.** The scripted dialogue is only for bots. People talk in the chat. By day you **whisper**: only players in the same room hear you. At trials everyone talks. At night nobody can speak except the dead, who have their own ghost channel.
+- **Secrets stay secret.** The server runs the game and sends each player only what their character knows. Your browser never receives anyone else's role, clues or position unless you could see them.
+- If you're killed or voted out, you keep watching (and chatting with the other ghosts) until the end.
+
+Voices work for everyone in the host's rooms, paid from the host's ElevenLabs key (cached, so repeated lines are free).
+
 ## Voices (ElevenLabs)
 
 Every student has a different voice, plus a narrator. The browser never sees your key: the local server calls ElevenLabs and caches each line in `.cache/tts/`, so repeated lines are free.
@@ -94,6 +114,9 @@ src/icons.js              hand-drawn style line icons (no emoji)
 src/lines.js              per-character dialogue (same pools for guilty and innocent)
 src/voices.js, voice.js   ElevenLabs casting + browser playback
 tools/serve.js            local server + ElevenLabs relay (key stays server-side)
+server/rooms.js           multiplayer rooms: lobby, timed turns, chat, per-player views
+src/net.js                multiplayer client (Server-Sent Events + POST)
+src/spotart.js            comic spot art for story panels
 src/main.js               UI: rendering, input, beat playback (panels + dialogue)
 tests/engine.test.js      rules tests
 tools/simulate.js         balance harness

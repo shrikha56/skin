@@ -9,7 +9,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { networkInterfaces } from 'node:os';
 import { VOICES, EXPRESSION_SETTINGS, DEFAULT_MODEL, MAX_TTS_CHARS } from '../src/voices.js';
+import { handleMultiplayer, isPlayerToken } from '../server/rooms.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -25,7 +27,8 @@ if (existsSync(envFile)) {
 // Ignore anything that isn't a valid port (e.g. a pasted "# comment" in zsh).
 const validPort = (v) => (/^\d+$/.test(String(v ?? '')) && Number(v) > 0 && Number(v) < 65536 ? Number(v) : null);
 const port = validPort(process.argv[2]) ?? validPort(process.env.PORT) ?? 8000;
-// Localhost only by default: the voice relay spends your ElevenLabs credits.
+// Localhost only by default. `npm run host` (HOST=0.0.0.0) lets friends on your
+// network join multiplayer rooms.
 const host = process.env.HOST || '127.0.0.1';
 const apiKey = process.env.ELEVENLABS_API_KEY || '';
 const apiBase = process.env.ELEVENLABS_BASE_URL || 'https://api.elevenlabs.io';
@@ -85,7 +88,11 @@ async function synthesize(voice, expr, text) {
   try { return await job; } finally { inflight.delete(key); }
 }
 
-async function handleTts(url, res) {
+// Voices spend the host's ElevenLabs credits, so only the host's own machine
+// and players who are in one of this server's rooms may use them.
+const isLoopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+
+async function handleTts(url, res, req) {
   if (url.pathname === '/api/tts/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ enabled: Boolean(apiKey), voices: Object.fromEntries(Object.entries(VOICES).map(([k, v]) => [k, v.name])) }));
@@ -95,6 +102,7 @@ async function handleTts(url, res) {
   const e = url.searchParams.get('e') || 'neutral';
   const t = (url.searchParams.get('t') || '').trim();
   if (!apiKey) { res.writeHead(503).end('Voices are off: no ELEVENLABS_API_KEY in .env'); return; }
+  if (!isLoopback(req) && !isPlayerToken(url.searchParams.get('k'))) { res.writeHead(403).end('Voices are for players in a room'); return; }
   if (!VOICES[v] || !t || t.length > MAX_TTS_CHARS) { res.writeHead(400).end('Bad voice request'); return; }
   try {
     const audio = await synthesize(v, e, t);
@@ -108,7 +116,8 @@ async function handleTts(url, res) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname.startsWith('/api/tts')) { await handleTts(url, res); return; }
+  if (url.pathname.startsWith('/api/tts')) { await handleTts(url, res, req); return; }
+  if (url.pathname.startsWith('/api/mp/')) { await handleMultiplayer(req, res, url); return; }
   let path = decodeURIComponent(url.pathname);
   if (path.endsWith('/')) path += 'index.html';
   const file = normalize(join(root, path));
@@ -138,6 +147,12 @@ function listen(p, attemptsLeft = 20) {
 server.once('listening', () => {
   console.log(`\nCrimson Confession (${version()}) is running at http://localhost:${server.address().port}`);
   console.log(apiKey ? `Voices: ON (ElevenLabs, model ${model})` : 'Voices: off (add ELEVENLABS_API_KEY=... to a .env file to turn them on)');
+  if (host === '0.0.0.0' || host === '::') {
+    const ips = Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address);
+    for (const ip of ips) console.log(`Friends on your Wi-Fi can join at  http://${ip}:${server.address().port}`);
+  } else {
+    console.log('Multiplayer: only this computer can join. Use `npm run host` to let friends on your Wi-Fi in.');
+  }
   console.log('(press Ctrl+C to stop)');
 });
 listen(port);

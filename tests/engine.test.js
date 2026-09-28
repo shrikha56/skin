@@ -147,7 +147,7 @@ test('learning a clue raises suspicion only of matching students', () => {
 test('votes: plurality of two or more expels, ties do not', () => {
   const g = createGame({ seed: 5, playerId: 'hana', playerRole: 'detective' });
   g.phase = 'trial';
-  g.trial = { day: 1, final: false, presented: 0, accused: false };
+  g.trial = { day: 1, final: false, presents: {}, accusers: [] };
   // Everyone deeply suspects the Obsessive.
   for (const id of g.order) if (id !== g.plot.yandere) g.chars[id].suspicion[g.plot.yandere] = 100;
   castVote(g, g.plot.yandere);
@@ -158,7 +158,7 @@ test('votes: plurality of two or more expels, ties do not', () => {
 
   const t = createGame({ seed: 6, playerId: 'hana' });
   t.phase = 'trial';
-  t.trial = { day: 1, final: false, presented: 0, accused: false };
+  t.trial = { day: 1, final: false, presents: {}, accusers: [] };
   for (const id of t.order) for (const o of t.order) if (id !== o) t.chars[id].suspicion[o] = 0;
   castVote(t, null);
   assert.equal(t.trial.result, null);
@@ -258,7 +258,7 @@ test('the Obsessive lies about where they were when they killed', () => {
 test('guilty and innocent students react to accusations the same way', () => {
   const g = createGame({ seed: 8, playerId: 'hana', playerRole: 'detective' });
   g.phase = 'trial';
-  g.trial = { day: 1, final: false, presented: 0, accused: false };
+  g.trial = { day: 1, final: false, presents: {}, accusers: [] };
   const beats = accuse(g, g.plot.yandere);
   const reply = beats.find((b) => b.kind === 'line' && b.speaker === g.plot.yandere);
   assert.equal(reply.expr, 'shocked');

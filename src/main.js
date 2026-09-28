@@ -4,7 +4,7 @@
 import {
   createGame, objectiveText, playerAct, playerActions, talkOptions, knownEvidence,
   visibleLog, canSeeRoom, presentEvidence, accuse, castVote, nightOptions,
-  knownNightPlans, resolveNight, autoplayStep, MAX_PRESENTS, briefing, hints, taskProgress,
+  knownNightPlans, resolveNight, autoplayStep, MAX_PRESENTS, briefing, hints, taskProgress, beatsFor, trialAllowance,
 } from './engine.js';
 import { CHARACTERS, ROOMS, ROLES, ROLE_ORDER, ITEMS, TONES, TRAIT_TEXT, PERIODS, TITLE, SETTING } from './data.js';
 import { CHAR_BY_ID, ROOM_BY_ID, adjacent, active, activeIds, occupants, nameOf, roomName, matchesEvidence } from './core.js';
@@ -12,12 +12,15 @@ import { portraitSVG } from './portraits.js';
 import { icon } from './icons.js';
 import { spotArt } from './spotart.js';
 import * as voice from './voice.js';
+import * as net from './net.js';
 
 const app = document.getElementById('app');
 const cinema = document.getElementById('cinema');
 
 let G = null;
-const setup = { char: 'hana', role: null };
+const setup = { char: 'hana', role: null, mode: 'solo', name: '', joinCode: new URLSearchParams(location.search).get('room') || '', error: '' };
+const mp = { lobby: null, chat: [], queue: Promise.resolve(), introShown: false, status: 'connected' };
+if (setup.joinCode) setup.mode = 'multi';
 const ui = { tab: 'actions', talk: null, busy: false, skip: false, marks: {}, mirror: false, night: {}, brief: false };
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -38,6 +41,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 async function playBeats(beats, { skipLabel = 'skip' } = {}) {
+  beats = G ? beatsFor(beats, G.playerId) : beats;
   if (!beats.length) return;
   ui.skipLabel = skipLabel;
   ui.busy = true;
@@ -258,7 +262,12 @@ function titleScreen() {
       <h1><span>Crimson</span><span>Confession</span></h1>
       <p class="tag">Six students. One of them is in love. Someone is in the way.</p>
     </div>
-    <section class="setup card">
+    <div class="mode-switch">
+      <button class="mode ${setup.mode === 'solo' ? 'on' : ''}" data-mode="solo">${icon('star')}<b>Play solo</b><small>You and five bots</small></button>
+      <button class="mode ${setup.mode === 'multi' ? 'on' : ''}" data-mode="multi">${icon('heart')}<b>Play with friends</b><small>2–6 players, bots fill empty seats</small></button>
+    </div>
+    ${setup.mode === 'multi' ? multiSetup() : ''}
+    <section class="setup card" ${setup.mode === 'multi' ? 'hidden' : ''}>
       <h2>Choose your student</h2>
       <div class="cast-grid">
         ${CHARACTERS.map((c) => `
@@ -305,8 +314,223 @@ function titleScreen() {
   app.querySelectorAll('[data-char]').forEach((b) => b.addEventListener('click', () => { setup.char = b.dataset.char; titleScreen(); }));
   app.querySelectorAll('[data-role]').forEach((b) => b.addEventListener('click', () => { setup.role = b.dataset.role || null; titleScreen(); }));
   app.querySelector('#start').addEventListener('click', startGame);
+  app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { setup.mode = b.dataset.mode; setup.error = ''; titleScreen(); }));
+  bindMultiSetup();
   bindVoiceToggle(app);
 }
+
+// ---------------------------------------------------------------------------
+// Multiplayer: create / join, lobby, and network-backed turns
+
+function studentPicker(taken = [], current = setup.char) {
+  return `<div class="cast-grid small">${CHARACTERS.map((c) => {
+    const who = taken.find((t) => t.char === c.id);
+    const mine = c.id === current;
+    return `<button class="cast-card ${mine ? 'on' : ''} ${who && !mine ? 'taken' : ''}" data-pick="${c.id}" ${who && !mine ? 'disabled' : ''} style="--hair:${c.hairHex}">
+      <div class="portrait-frame">${portraitSVG(c.id, mine ? 'happy' : 'neutral')}</div>
+      <b>${esc(c.short)}</b>
+      <small>${who ? esc(who.name) + (who.host ? ' (host)' : '') : 'bot'}</small>
+    </button>`;
+  }).join('')}</div>`;
+}
+
+function multiSetup() {
+  const saved = net.saved();
+  return `
+  <section class="setup card mp-setup">
+    ${saved ? `<div class="rejoin">You were in room <b>${esc(saved.code)}</b>. <button class="btn primary" id="rejoin">Rejoin</button> <button class="btn ghost" id="forget">Forget it</button></div>` : ''}
+    <h2>Your name</h2>
+    <input class="text-in" id="mpName" maxlength="20" placeholder="What should the class call you?" value="${esc(setup.name)}">
+    <h2>Pick a student</h2>
+    ${studentPicker([])}
+    <div class="mp-actions">
+      <div class="mp-box">
+        <h3>Host a room</h3>
+        <p class="muted small">You get a code to share. Start once at least 2 people are in.</p>
+        <button class="btn primary big" id="mpCreate">Create room</button>
+      </div>
+      <div class="mp-box">
+        <h3>Join a room</h3>
+        <input class="text-in code-in" id="mpCode" maxlength="4" placeholder="CODE" value="${esc(setup.joinCode)}">
+        <button class="btn big" id="mpJoin">Join</button>
+      </div>
+    </div>
+    ${setup.error ? `<p class="error">${esc(setup.error)}</p>` : ''}
+    <details class="howto"><summary>How playing with friends works</summary><ul>
+      <li>Everyone opens the host's link. On the same Wi-Fi, the host runs <code>npm run host</code> and shares the address it prints.</li>
+      <li>Each day turn, everybody picks one action at the same time, and the turn resolves when all players are ready (or the timer runs out).</li>
+      <li><b>Chat is real.</b> During the day you whisper only to people in the same room. At trials, everyone talks. At night, only the dead can speak.</li>
+      <li>Empty seats are played by bots, so 2 friends + 4 bots works fine.</li>
+    </ul></details>
+  </section>`;
+}
+
+function bindMultiSetup() {
+  const name = app.querySelector('#mpName');
+  if (!name) return;
+  name.addEventListener('input', () => { setup.name = name.value; });
+  const code = app.querySelector('#mpCode');
+  code?.addEventListener('input', () => { setup.joinCode = code.value.toUpperCase(); code.value = setup.joinCode; });
+  app.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', () => { setup.char = b.dataset.pick; titleScreen(); }));
+  const guard = (fn) => async () => { try { setup.error = ''; await fn(); } catch (e) { setup.error = e.message; titleScreen(); } };
+  app.querySelector('#mpCreate').addEventListener('click', guard(() => net.create(setup.name || 'Host', setup.char)));
+  app.querySelector('#mpJoin').addEventListener('click', guard(() => { if (!setup.joinCode) throw new Error('Enter the 4-letter room code.'); return net.join(setup.joinCode, setup.name || 'Player', setup.char); }));
+  app.querySelector('#rejoin')?.addEventListener('click', () => net.resume(net.saved()));
+  app.querySelector('#forget')?.addEventListener('click', () => { net.leave(); titleScreen(); });
+}
+
+function lobbyScreen() {
+  const L = mp.lobby;
+  const link = `${location.origin}/?room=${L.code}`;
+  const host = L.you.host;
+  document.body.className = '';
+  app.innerHTML = `
+  <div class="title-screen lobby">
+    <div class="logo small-logo"><h1><span>Crimson</span><span>Confession</span></h1></div>
+    <section class="setup card">
+      <div class="room-code"><span class="label-box">Room code</span><b>${esc(L.code)}</b>
+        <button class="btn ghost small" id="copyLink">Copy invite link</button></div>
+      <p class="muted small">Share the code or this link: <code>${esc(link)}</code></p>
+      <h2>Students <small class="muted">${L.players.length}/${L.max} players · the rest are bots</small></h2>
+      ${studentPicker(L.players, L.you.char)}
+      <ul class="plain who">${L.players.map((p) => `<li>${p.online ? '<i class="dot-on"></i>' : '<i class="dot-off"></i>'} <b>${esc(p.name)}</b> as ${esc(nameOf(p.char))}${p.host ? ' <span class="chip">host</span>' : ''}${p.name === L.you.name && p.char === L.you.char ? ' <span class="chip">you</span>' : ''}</li>`).join('')}</ul>
+      ${host ? `
+        <details class="timers"><summary>Timers</summary>
+          ${['day', 'trial', 'night'].map((k) => `<label>${k === 'day' ? 'Day turn' : k === 'trial' ? 'Trial (talk + vote)' : 'Night'} <input type="number" min="5" max="600" data-timer="${k}" value="${L.timers[k]}"> s</label>`).join('')}
+        </details>
+        <button class="btn primary big" id="mpStart" ${L.players.length < L.min ? 'disabled' : ''}>${L.players.length < L.min ? `Waiting for ${L.min - L.players.length} more…` : 'Start the match'}</button>`
+      : '<p class="waiting-note">Waiting for the host to start…</p>'}
+      <button class="btn ghost" id="mpLeave">Leave room</button>
+      <div class="chat-dock lobby-chat">${chatDock()}</div>
+    </section>
+  </div>`;
+  app.querySelectorAll('[data-pick]').forEach((b) => b.addEventListener('click', () => net.post('pick', { char: b.dataset.pick }).catch((e) => alert(e.message))));
+  app.querySelector('#copyLink').addEventListener('click', () => navigator.clipboard?.writeText(link));
+  app.querySelector('#mpStart')?.addEventListener('click', () => {
+    const timers = {};
+    app.querySelectorAll('[data-timer]').forEach((i) => { timers[i.dataset.timer] = Number(i.value); });
+    net.post('start', { timers }).catch((e) => alert(e.message));
+  });
+  app.querySelector('#mpLeave').addEventListener('click', () => { net.leave(); mp.lobby = null; G = null; titleScreen(); });
+  bindChat();
+}
+
+// Chat: real conversation between people (bots keep their scripted lines).
+function chatDock() {
+  const ch = G?.mp?.channel ?? { id: 'all', label: 'Lobby: everyone' };
+  const msgs = mp.chat.slice(-80);
+  return `
+    <div class="chat-head">${icon('note')} <b>Chat</b> <span class="channel ch-${esc(ch.id.split(':')[0])}">${esc(ch.label)}</span></div>
+    <div class="chat-log" id="chatLog">${msgs.map(chatLine).join('') || '<p class="muted small">No messages yet.</p>'}</div>
+    <form class="chat-form" id="chatForm">
+      <input id="chatInput" maxlength="280" autocomplete="off" placeholder="${ch.id === 'none' ? 'Everyone is asleep…' : 'Say something…'}" ${ch.id === 'none' ? 'disabled' : ''} value="${esc(ui.chatDraft || '')}">
+      <button class="btn small" ${ch.id === 'none' ? 'disabled' : ''}>Send</button>
+    </form>`;
+}
+
+function chatLine(m) {
+  if (!m.from) return `<div class="msg system">${esc(m.text)}</div>`;
+  const c = CHAR_BY_ID[m.from];
+  const tag = m.channel === 'ghost' ? ' <i class="tag">ghost</i>' : m.channel.startsWith('room:') ? ' <i class="tag">whisper</i>' : '';
+  return `<div class="msg" style="--hair:${c.hairHex}"><span class="mini-portrait">${portraitSVG(m.from, 'neutral')}</span><div><b>${esc(c.short)}</b> <small>${esc(m.name)}</small>${tag}<p>${esc(m.text)}</p></div></div>`;
+}
+
+function bindChat() {
+  const form = app.querySelector('#chatForm');
+  if (!form) return;
+  const input = form.querySelector('#chatInput');
+  input.addEventListener('input', () => { ui.chatDraft = input.value; });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    try {
+      await net.post('chat', { text });
+      ui.chatDraft = '';
+      input.value = '';
+    } catch (err) {
+      input.placeholder = err.message;
+    }
+  });
+  const log = app.querySelector('#chatLog');
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function refreshChat() {
+  const log = document.getElementById('chatLog');
+  if (!log) return;
+  log.innerHTML = mp.chat.slice(-80).map(chatLine).join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+// Everything from the server is applied in order: beats play, then views apply.
+const enqueue = (fn) => { mp.queue = mp.queue.then(fn).catch((e) => console.error(e)); };
+
+net.on('lobby', (L) => {
+  mp.lobby = L;
+  if (L.phase === 'lobby') {
+    // Back in the lobby (fresh room, or the host ended the round).
+    enqueue(async () => { G = null; lobbyScreen(); });
+  }
+});
+net.on('view', (v) => enqueue(async () => {
+  const first = !G || (G.phase === 'over' && v.phase !== 'over');
+  G = v;
+  voice.setToken(net.token());
+  if (first) {
+    Object.assign(ui, { tab: 'actions', talk: null, marks: {}, mirror: false, night: {} });
+    mp.introShown = false;
+  }
+  renderKeepingChat();
+  if (!mp.introShown && G.phase !== 'over') {
+    mp.introShown = true;
+    await playBeats(introStory(), { skipLabel: 'Skip intro' });
+    renderKeepingChat();
+  }
+}));
+net.on('beats', (beats) => enqueue(async () => { await playBeats(beats); }));
+net.on('chat', (msgs) => {
+  mp.chat.push(...msgs);
+  if (mp.chat.length > 300) mp.chat.splice(0, mp.chat.length - 300);
+  refreshChat();
+});
+net.on('status', (st) => { mp.status = st; const el = document.getElementById('netStatus'); if (el) el.textContent = st === 'connected' ? '' : 'Reconnecting…'; });
+
+// Re-render without losing what the player is typing in the chat box.
+function renderKeepingChat() {
+  const focused = document.activeElement?.id === 'chatInput';
+  const pos = focused ? document.activeElement.selectionStart : null;
+  render();
+  if (focused) {
+    const input = document.getElementById('chatInput');
+    if (input) { input.focus(); input.setSelectionRange(pos, pos); }
+  }
+}
+
+function waitingBanner() {
+  if (!net.active() || !G?.mp || G.phase === 'over') return '';
+  const m = G.mp;
+  const names = m.waitingOn.map((c) => m.humans[c] || nameOf(c));
+  const mine = !active(G, G.playerId) ? 'You are out. Watching…' : m.submitted ? 'Locked in.' : G.phase === 'day' ? 'Choose your action.' : G.phase === 'trial' ? 'Talk it out, then vote.' : 'Choose where to sleep.';
+  return `<div class="mp-bar">
+    <span class="room-tag">Room ${esc(m.code)}</span>
+    <b>${esc(mine)}</b>
+    ${names.length ? `<span class="muted">Waiting for ${esc(names.join(', '))}</span>` : ''}
+    <span class="timer" id="mpTimer" data-deadline="${m.deadline || ''}"></span>
+    ${m.you.host ? '<button class="btn ghost small" id="hurry">Skip timer</button>' : ''}
+    <span id="netStatus" class="muted small"></span>
+  </div>`;
+}
+
+setInterval(() => {
+  const el = document.getElementById('mpTimer');
+  if (!el || !el.dataset.deadline) return;
+  const left = Math.max(0, Math.round((Number(el.dataset.deadline) - Date.now()) / 1000));
+  el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  el.classList.toggle('low', left <= 10);
+}, 500);
+
+const humanName = (id) => (net.active() && G?.mp?.humans?.[id] ? G.mp.humans[id] : null);
 
 function voiceToggle() {
   if (!voice.available()) return '';
@@ -356,7 +580,8 @@ function render() {
       ${taskMeter()}
       ${voiceToggle()}
     </header>
-    ${!alive ? `<div class="spectator">${p.alive ? 'You were expelled.' : 'You are dead.'} The story continues without you. <button class="btn" id="specStep">Continue</button> <button class="btn ghost" id="specEnd">Skip to the end</button></div>` : ''}
+    ${waitingBanner()}
+    ${!alive && !net.active() ? `<div class="spectator">${p.alive ? 'You were expelled.' : 'You are dead.'} The story continues without you. <button class="btn" id="specStep">Continue</button> <button class="btn ghost" id="specEnd">Skip to the end</button></div>` : ''}
     <main class="layout">
       <aside class="map-panel card">
         <h3>Academy Map</h3>
@@ -374,6 +599,7 @@ function render() {
           ${onStage.map((id) => actor(id)).join('')}
         </div>
         <div class="dialogue" id="dialogue">${dialogueIdle()}</div>
+        ${net.active() ? `<div class="chat-dock">${chatDock()}</div>` : ''}
       </section>
       <aside class="side card">${G.phase === 'trial' ? trialPanel() : sidePanel()}</aside>
     </main>
@@ -436,7 +662,7 @@ function actor(id) {
   return `
     <button class="actor ${isMe ? 'me' : ''} ${ui.talk?.to === id ? 'selected' : ''} ${clickable ? 'talkable' : ''}" data-portrait="${id}" ${clickable ? `data-talk="${id}"` : 'tabindex="-1"'} style="--hair:${c.hairHex}">
       <div class="portrait-frame">${portraitSVG(id, expr)}</div>
-      <span class="actor-name">${esc(c.short)}${isMe ? ' (you)' : ''}${mark ? ` <i class="mark mark-${mark}">${icon(mark === 'sus' ? 'alert' : 'heart')}</i>` : ''}</span>
+      <span class="actor-name">${esc(c.short)}${isMe ? ' (you)' : humanName(id) ? ` <small class="pname">${esc(humanName(id))}</small>` : ''}${mark ? ` <i class="mark mark-${mark}">${icon(mark === 'sus' ? 'alert' : 'heart')}</i>` : ''}</span>
       ${trust !== null ? `<span class="trust" title="How much ${esc(c.short)} trusts you"><i style="width:${trust}%"></i></span>` : ''}
     </button>`;
 }
@@ -456,8 +682,9 @@ function talkMenu() {
   const opts = talkOptions(G, G.playerId, t.to);
   const unhinged = me().role === 'yandere' && me().sanity < 35;
   let body;
+  const person = humanName(t.to);
   if (!t.option) {
-    body = `<div class="choices">${opts.map((o) => `<button class="choice" data-opt="${o.id}"><b>${esc(o.label)}</b><small>${esc(o.hint)}</small></button>`).join('')}</div>`;
+    body = `${person ? `<p class="sub">${esc(person)} is a real person. Talk to them in the chat below. These are the game actions you can take together:</p>` : ''}<div class="choices">${opts.map((o) => `<button class="choice" data-opt="${o.id}"><b>${esc(o.label)}</b><small>${esc(o.hint)}</small></button>`).join('')}</div>`;
   } else {
     const o = opts.find((x) => x.id === t.option);
     let chips = '';
@@ -501,6 +728,7 @@ function actionsTab() {
   if (inv) plans.push(`You plan to sleep in the <b>${esc(roomName(inv.room))}</b>.`);
   for (const [id, v] of Object.entries(G.invites)) if (v.from === G.playerId && id !== G.playerId) plans.push(`${esc(nameOf(id))} will meet you in the ${esc(roomName(v.room))}.`);
   for (const o of G.offers) plans.push(`${esc(nameOf(o.from))} invited you to the ${esc(roomName(o.room))}.`);
+  if (net.active() && G.mp.submitted) return `<div class="next-step"><span class="label-box">Locked in</span><p>Your move is in. Chat while you wait for the others.</p></div>`;
   const tips = hints(G, G.playerId);
   const fake = ['yandere', 'accomplice'].includes(p.role);
   const doneCount = p.tasks.filter((t) => t.done).length;
@@ -585,16 +813,17 @@ function trialPanel() {
     return `<h3>Class Trial</h3><p class="muted">You can only watch.</p><button class="btn primary" data-vote="">Watch the vote</button>`;
   }
   const presentable = knownEvidence(G, G.playerId).filter((e) => !e.public);
+  const allow = trialAllowance(G, G.playerId);
   const others = activeIds(G).filter((id) => id !== G.playerId);
   return `
     <h3>${t.emergency ? 'Emergency Trial' : t.final ? 'Final Trial' : 'Class Trial'}</h3>
     <p class="muted small">Present clues, accuse someone, then vote. The most votes (at least 2, and more than abstentions) gets someone expelled.</p>
-    <h4>Present evidence <small class="muted">${MAX_PRESENTS - t.presented} left</small></h4>
-    ${presentable.length && t.presented < MAX_PRESENTS
+    <h4>Present evidence <small class="muted">${allow.presents} left</small></h4>
+    ${presentable.length && allow.presents > 0
       ? presentable.map((e) => `<button class="evidence-btn" data-present="${e.id}">${evidenceCard(e)}</button>`).join('')
       : '<p class="muted">Nothing new to present.</p>'}
     <h4>Accuse</h4>
-    ${t.accused ? '<p class="muted">You have made your accusation.</p>'
+    ${!allow.accuse ? '<p class="muted">You have made your accusation.</p>'
       : `<div class="chip-row">${others.map((id) => `<button class="chip-btn danger" data-accuse="${id}">${esc(nameOf(id))}</button>`).join('')}</div>`}
     <h4>Vote to expel</h4>
     <div class="chip-row">${others.map((id) => `<button class="chip-btn vote" data-vote="${id}">${esc(nameOf(id))}</button>`).join('')}
@@ -606,6 +835,9 @@ function trialPanel() {
 function nightModal() {
   const o = nightOptions(G);
   const alive = active(G, G.playerId);
+  if (net.active() && (!alive || G.mp.submitted)) {
+    return `<div class="modal night"><div class="modal-card"><h2>Night ${G.day}</h2><p>${alive ? 'You close your eyes and listen to the rain…' : 'The dead do not sleep. You drift through the dark halls and watch.'}</p><p class="muted">Waiting for everyone to choose.</p></div></div>`;
+  }
   if (!alive) {
     return `<div class="modal night"><div class="modal-card"><h2>Night ${G.day}</h2><p>The dead do not sleep.</p><button class="btn primary" id="sleep">Continue</button></div></div>`;
   }
@@ -674,11 +906,17 @@ function resultsScreen() {
       </div>
       <h3>Timeline</h3>
       <ul class="plain log">${G.log.filter((e) => !e.to).map((e) => `<li><small>D${e.day}</small> ${esc(e.text)}</li>`).join('')}</ul>
-      <div class="row"><button class="btn primary big" id="again">Play again</button><button class="btn ghost" id="toTitle">Change student / role</button></div>
+      ${net.active()
+        ? `<div class="row">${G.mp.you.host ? '<button class="btn primary big" id="toLobby">Back to the lobby</button>' : '<p class="waiting-note">The host can take everyone back to the lobby for another round.</p>'}<button class="btn ghost" id="leaveRoom">Leave room</button></div>
+           <div class="chat-dock">${chatDock()}</div>`
+        : '<div class="row"><button class="btn primary big" id="again">Play again</button><button class="btn ghost" id="toTitle">Change student / role</button></div>'}
     </section>
   </div>`;
-  app.querySelector('#again').addEventListener('click', startGame);
-  app.querySelector('#toTitle').addEventListener('click', titleScreen);
+  app.querySelector('#again')?.addEventListener('click', startGame);
+  app.querySelector('#toTitle')?.addEventListener('click', titleScreen);
+  app.querySelector('#toLobby')?.addEventListener('click', () => net.post('lobby').catch((e) => alert(e.message)));
+  app.querySelector('#leaveRoom')?.addEventListener('click', () => { net.leave(); mp.lobby = null; G = null; titleScreen(); });
+  bindChat();
 }
 
 // ---------------------------------------------------------------------------
@@ -688,6 +926,7 @@ async function act(action) {
   if (ui.busy) return;
   ui.talk = null;
   ui.mirror = false;
+  if (net.active()) return send('act', { action });
   const beats = playerAct(G, action);
   preRender();
   await playBeats(beats);
@@ -700,6 +939,17 @@ function preRender() {
   ui.busy = true;
   render();
   ui.busy = false;
+}
+
+// Multiplayer: hand the move to the server; the result arrives as beats + a view.
+async function send(path, body) {
+  if (G?.mp?.submitted && path !== 'trial') return;
+  try {
+    await net.post(path, body);
+  } catch (e) {
+    const box = document.getElementById('dialogue');
+    if (box) box.innerHTML = `<p class="narration error">${esc(e.message)}</p>`;
+  }
 }
 
 async function run(fn) {
@@ -733,14 +983,16 @@ function bind() {
   });
   $$('#roleBadge', async () => { await playBeats(introStory({ full: false }), { skipLabel: 'Close' }); render(); });
   // Trial
-  $$('[data-present]', (el) => run(() => presentEvidence(G, el.dataset.present)));
-  $$('[data-accuse]', (el) => run(() => accuse(G, el.dataset.accuse)));
-  $$('[data-vote]', (el) => { ui.night = {}; run(() => castVote(G, el.dataset.vote || null)); });
+  $$('[data-present]', (el) => (net.active() ? send('trial', { present: el.dataset.present }) : run(() => presentEvidence(G, el.dataset.present))));
+  $$('[data-accuse]', (el) => (net.active() ? send('trial', { accuse: el.dataset.accuse }) : run(() => accuse(G, el.dataset.accuse))));
+  $$('[data-vote]', (el) => { ui.night = {}; if (net.active()) send('trial', { vote: el.dataset.vote || null }); else run(() => castVote(G, el.dataset.vote || null)); });
   // Night
   $$('[data-sleep]', (el) => { ui.night.sleep = el.dataset.sleep; render(); });
   $$('[data-kill]', (el) => { ui.night.kill = el.dataset.kill || null; render(); });
   $$('[data-stake]', (el) => { ui.night.stakeout = el.dataset.stake || null; render(); });
-  $$('#sleep', () => { const choice = { ...ui.night }; ui.night = {}; run(() => resolveNight(G, choice)); });
+  $$('#sleep', () => { const choice = { ...ui.night }; ui.night = {}; if (net.active()) send('night', { choice }); else run(() => resolveNight(G, choice)); });
+  $$('#hurry', () => net.post('hurry').catch(() => {}));
+  bindChat();
   // Spectator
   $$('#specStep', () => run(() => autoplayStep(G)));
   $$('#specEnd', () => run(() => { const all = []; let guard = 0; while (G.phase !== 'over' && guard++ < 200) all.push(...autoplayStep(G).filter((b) => b.kind === 'panel')); return all; }));

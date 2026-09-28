@@ -16,6 +16,8 @@ fetch('/api/tts/status')
   .then((s) => { isAvailable = Boolean(s.enabled); readyListeners.forEach((f) => f()); })
   .catch(() => {});
 
+let roomToken = null;
+export const setToken = (t) => { roomToken = t; };
 export const available = () => isAvailable;
 export const enabled = () => isAvailable && pref();
 export const onReady = (f) => readyListeners.push(f);
@@ -31,11 +33,11 @@ function urlFor(beat) {
   if (!beat) return null;
   if (beat.kind === 'line' && CHAR_BY_ID[beat.speaker]) {
     const t = speakable(beat.text);
-    return t && t !== '…' ? `/api/tts?v=${beat.speaker}&e=${encodeURIComponent(beat.expr || 'neutral')}&t=${encodeURIComponent(t)}` : null;
+    return t && t !== '…' ? `/api/tts?v=${beat.speaker}&e=${encodeURIComponent(beat.expr || 'neutral')}&t=${encodeURIComponent(t)}${roomToken ? `&k=${roomToken}` : ''}` : null;
   }
   if (beat.kind === 'narrate' || ((beat.kind === 'panel' || beat.kind === 'scene') && beat.caption)) {
     const t = speakable(beat.text ?? beat.caption);
-    return t ? `/api/tts?v=narrator&e=narration&t=${encodeURIComponent(t)}` : null;
+    return t ? `/api/tts?v=narrator&e=narration&t=${encodeURIComponent(t)}${roomToken ? `&k=${roomToken}` : ''}` : null;
   }
   return null;
 }
