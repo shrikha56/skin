@@ -180,7 +180,7 @@ function detectiveDay(state, id) {
   if (hasFindable(state, c.room, id)) return { type: 'search' };
   const scene = latestScene(state);
   if (scene && hasFindable(state, scene.room, id)) return move(state, id, scene.room);
-  if (c.room === 'library' && c.researchedDay !== state.day) return roomAct;
+  if (c.room === 'library' && !c.researchedDay) return roomAct;
   if (c.room === 'classroom' && c.camSnapshot?.day !== state.day && chance(state, 0.5)) return roomAct;
   if (state.day > 1 && hasFindable(state, 'classroom', id)) return move(state, id, 'classroom') ?? { type: 'search' };
   const top = topSuspect(state, id);

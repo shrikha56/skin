@@ -285,7 +285,9 @@ export function roomAction(state, id) {
   const r = ROOM_BY_ID[c.room];
   const a = { ...r.action, ok: true, reason: '' };
   const others = occupants(state, c.room).filter((o) => o !== id);
-  if (a.id === 'research' && c.researchedDay === state.day) Object.assign(a, { ok: false, reason: 'Already used today.' });
+  // Investigation shortcuts are rationed so nobody can simply clear the class.
+  if (a.id === 'research' && c.researchedDay) Object.assign(a, { ok: false, reason: 'You already used the archive this match.' });
+  if (a.id === 'cameras' && c.camSnapshot?.day === state.day) Object.assign(a, { ok: false, reason: 'You already checked the cameras today.' });
   if (a.id === 'rehearse' && !others.length) Object.assign(a, { ok: false, reason: 'Nobody here to rehearse with.' });
   if (a.id === 'bell' && c.usedBell) Object.assign(a, { ok: false, reason: 'You already rang the bell this match.' });
   if (a.id === 'lock' && c.usedLock) Object.assign(a, { ok: false, reason: 'You already barricaded once this match.' });
@@ -1280,7 +1282,7 @@ export function briefing(state, id) {
       steps: [
         'Every clue points at hair colour or build. Each fits two students, and two different clues point at exactly one.',
         'Search crime scenes: you always find the hidden clues there.',
-        'Library: the gossip archive clears one innocent per day. Classroom: the cameras show where everyone is.',
+        'Library: the gossip archive clears one innocent, but only once per match. Classroom: the cameras show where everyone is, once per day.',
         'Watch for blood on people\'s sleeves, and for anyone who claims an alibi nobody else confirms.',
         'At night you can stake out a room. Any attack there fails and you see the attacker.',
         'Courtyard: ring the bell to call a trial early. At trials, present your clues, accuse, and vote.',

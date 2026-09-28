@@ -7,10 +7,10 @@ export const SETTING = 'Hoshizora Academy';
 // 3x2 grid. Movement is orthogonal between neighbouring rooms.
 export const ROOMS = [
   { id: 'library', name: 'Library', x: 0, y: 0, camera: false, item: 'diary',
-    action: { id: 'research', icon: 'book', label: 'Dig through the gossip archive', desc: 'Once per day: learn one student who is definitely NOT the Obsessive.' },
+    action: { id: 'research', icon: 'book', label: 'Dig through the gossip archive', desc: 'Once per match: learn one student who is definitely NOT the Obsessive.' },
     blurb: 'Tall shelves swallow the lamplight. Easy to vanish between the stacks.' },
   { id: 'classroom', name: 'Classroom 2-B', x: 1, y: 0, camera: true, item: 'keycard',
-    action: { id: 'cameras', icon: 'camera', label: 'Check the security monitor', desc: 'See where every student is right now, and review last night\'s footage.' },
+    action: { id: 'cameras', icon: 'camera', label: 'Check the security monitor', desc: 'Once per day: see where every student is right now, and review last night\'s footage.' },
     blurb: 'The security monitor hums behind the teacher\'s desk. A camera watches the door.' },
   { id: 'music', name: 'Music Room', x: 2, y: 0, camera: false, item: 'mirror',
     action: { id: 'rehearse', icon: 'note', label: 'Rehearse together', desc: 'Everyone here trusts you more (+8). The room is soundproof: nobody outside hears a scream.' }, soundproof: true,

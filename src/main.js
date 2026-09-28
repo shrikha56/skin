@@ -10,6 +10,7 @@ import { CHARACTERS, ROOMS, ROLES, ROLE_ORDER, ITEMS, TONES, TRAIT_TEXT, PERIODS
 import { CHAR_BY_ID, ROOM_BY_ID, adjacent, active, activeIds, occupants, nameOf, roomName, matchesEvidence } from './core.js';
 import { portraitSVG } from './portraits.js';
 import { icon } from './icons.js';
+import { spotArt } from './spotart.js';
 import * as voice from './voice.js';
 
 const app = document.getElementById('app');
@@ -36,8 +37,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { ui.skip = true; advance(); }
 });
 
-async function playBeats(beats) {
+async function playBeats(beats, { skipLabel = 'skip' } = {}) {
   if (!beats.length) return;
+  ui.skipLabel = skipLabel;
   ui.busy = true;
   document.body.classList.add('busy');
   for (let i = 0; i < beats.length; i++) {
@@ -84,7 +86,7 @@ function showLine(b) {
 }
 
 const typewriter = (text) => esc(text).split(' ').map((w, i) => `<span class="tw" style="animation-delay:${Math.min(i * 22, 900)}ms">${w}</span>`).join(' ');
-const continueHint = () => `<div class="continue">${icon('caret')} <span>click · space</span> <button class="skip-btn" data-skip>skip</button></div>`;
+const continueHint = () => `<div class="continue">${icon('caret')} <span>click · space</span> <button class="skip-btn ${ui.skipLabel !== 'skip' ? 'big' : ''}" data-skip>${esc(ui.skipLabel || 'skip')}</button></div>`;
 
 function showPanel(b) {
   const cast = b.cast || [];
@@ -95,10 +97,13 @@ function showPanel(b) {
         ${portraitSVG(c.id, c.expr, { dead: c.expr === 'dead' })}
         <span class="subname">${esc(CHAR_BY_ID[c.id].short)}</span>
       </div>`).join('')
-    : `<div class="subpanel empty"><div class="speedlines"></div><span class="panel-glyph" aria-hidden="true">${b.icon ? icon(ITEMS[b.icon]?.icon ?? b.icon) : PANEL_GLYPHS[b.mood] ?? '✦'}</span></div>`;
+    : '';
+  const art = b.art || (!cast.length ? (b.icon ? ICON_ART[ITEMS[b.icon]?.icon ?? b.icon] : null) ?? PANEL_ART[b.mood] ?? 'star' : null);
+  const artPanel = art ? `<div class="subpanel art"><div class="speedlines"></div>${spotArt(art)}</div>` : '';
   cinema.innerHTML = `
-    <div class="webtoon mood-${esc(b.mood)} cast-${Math.min(cast.length, 6)}" style="${b.color ? `--role:${b.color}` : ''}">
-      <div class="panel-grid">${panels}</div>
+    <div class="webtoon mood-${esc(b.mood)} cast-${Math.min(cast.length + (art ? 1 : 0), 6)} ${b.story ? 'story' : ''}" style="${b.color ? `--role:${b.color}` : ''}">
+      ${b.story ? `<div class="story-count">${b.story}</div>` : ''}
+      <div class="panel-grid">${artPanel}${panels}</div>
       ${b.sfx ? `<div class="sfx">${esc(b.sfx)}</div>` : ''}
       ${whisperFor(b) ? `<div class="vbubble" lang="ja">${esc(whisperFor(b))}</div>` : ''}
       ${b.label ? `<div class="label-box panel-label">${esc(b.label.title)}<small>${esc(b.label.sub)}</small></div>` : ''}
@@ -116,7 +121,57 @@ function showPanel(b) {
 }
 
 // Big panel illustrations stay emoji: they read as painted spot art at this size.
-const PANEL_GLYPHS = { night: '🌙', dark: '🕯️', morning: '☀️', shock: '❗', crimson: '🥀', trial: '⚖️', pink: '💗', neutral: '✦', role: '🗝️' };
+// Comic spot art for panels without a character in them.
+const PANEL_ART = { night: 'moon', dark: 'candle', morning: 'sun', shock: 'alert', crimson: 'rose', trial: 'scales', pink: 'heart', neutral: 'star', role: 'key' };
+const ICON_ART = { page: 'book', card: 'camera', camera: 'camera', book: 'book', bell: 'bell', lock: 'lock', note: 'heart', search: 'magnifier' };
+
+// Pick spot art for a line of the intro from what it talks about.
+function artFor(text) {
+  const t = text.toLowerCase();
+  if (/stab|kill|strike|murder/.test(t)) return 'knife';
+  if (/timetable|task|chore/.test(t)) return 'clipboard';
+  if (/blood|wash|infirmary/.test(t)) return 'candle';
+  if (/scream|bell|trial early/.test(t)) return 'bell';
+  if (/night|sleep|barricade/.test(t)) return 'moon';
+  if (/clue|search|evidence|hair|camera/.test(t)) return 'magnifier';
+  if (/archive|library/.test(t)) return 'book';
+  if (/trial|vote|accuse|blame/.test(t)) return 'scales';
+  if (/love|confess|crush|trust|flirt|beloved|obsession/.test(t)) return 'heart';
+  if (/rumor|whisper/.test(t)) return 'rose';
+  if (/alone|never be/.test(t)) return 'alert';
+  return 'star';
+}
+
+// The whole briefing as a webtoon: one panel per click, skippable.
+function introStory({ full = true } = {}) {
+  const b = briefing(G, G.playerId);
+  const r = role(G.playerId);
+  const pid = G.playerId;
+  const p = G.plot;
+  const mentioned = (text) => G.order.filter((id) => id !== pid && new RegExp(`\\b${nameOf(id)}\\b`).test(text)).slice(0, 2)
+    .map((id) => ({ id, expr: id === p.target && me().role === 'yandere' ? 'neutral' : id === p.beloved && me().role === 'yandere' ? 'happy' : 'neutral' }));
+  const beats = [];
+  if (full) {
+    beats.push({ kind: 'panel', mood: 'night', art: 'storm', sfx: '*CRACK-BOOM*', caption: `A storm has sealed ${SETTING}. The gates won't open for three days.` });
+    beats.push({ kind: 'panel', mood: 'neutral', sfx: '*SIX STUDENTS*', caption: 'Six students are trapped inside. One of them is in love. Someone else is in the way.', cast: G.order.map((id) => ({ id, expr: 'suspicious' })) });
+  }
+  beats.push({ kind: 'panel', mood: 'role', color: r.color, sfx: r.sfx, caption: `${r.pitch} Only you know this.`, label: { title: r.name, sub: r.stat }, whisper: r.whisper, cast: [{ id: pid, expr: me().role === 'yandere' ? 'yandere' : 'suspicious' }] });
+  beats.push({ kind: 'panel', mood: 'pink', art: { yandere: 'knife', accomplice: 'key', detective: 'magnifier', target: 'lock', socialite: 'rose', romantic: 'heart' }[me().role], sfx: '*HOW YOU WIN*', caption: b.goal, cast: mentioned(b.goal) });
+  b.steps.forEach((st) => beats.push({ kind: 'panel', mood: 'neutral', art: artFor(st), caption: st, cast: mentioned(st) }));
+  if (me().role === 'target') beats.push({ kind: 'panel', mood: 'shock', art: 'alert', sfx: '*GASP*', caption: knownEvidence(G, pid)[0].text });
+  beats.push({ kind: 'panel', mood: 'dark', art: 'alert', sfx: '*CAREFUL*', caption: b.lose });
+  if (full) {
+    beats.push({ kind: 'panel', mood: 'morning', art: 'school', sfx: '*4 TURNS*', caption: 'Each day has 4 turns: Morning, Lunch, After School, Dusk. Each turn you do ONE thing: move to a room next door, talk to someone, search, do a task, or use the room\'s special action.' });
+    beats.push({ kind: 'panel', mood: 'neutral', art: 'clipboard', sfx: '*TASKS*', caption: ['yandere', 'accomplice'].includes(me().role)
+      ? 'Everyone has 3 chores around the school. Yours are fake, but doing them makes you look innocent.'
+      : 'You have 3 chores around the school. Finish them for a clue about the killer. If the whole class finishes, the cameras reveal the killer\'s build.' });
+    beats.push({ kind: 'panel', mood: 'trial', art: 'scales', sfx: '*CLASS TRIAL*', caption: 'At the end of each day: a Class Trial. Present clues, accuse someone, and vote. The most votes gets someone expelled into the storm.' });
+    beats.push({ kind: 'panel', mood: 'night', art: 'moon', sfx: '*LIGHTS OUT*', caption: 'Then night falls. You sleep wherever you ended the day. Anyone sleeping alone is in danger.' });
+    beats.push({ kind: 'panel', mood: 'pink', art: 'heart', sfx: '*GOOD LUCK*', caption: 'Stuck? The Actions tab always has a "Next step" tip. Click your role badge to watch this again.' });
+  }
+  beats.forEach((bt, i) => { bt.story = `${i + 1} / ${beats.length}`; });
+  return beats;
+}
 
 // Animated stab: the killer lunges, the knife swings, a slash tears across the
 // panel, blood splatters, and the victim crumples. Cartoon webtoon style.
@@ -265,14 +320,7 @@ async function startGame() {
   G = createGame({ seed: (Date.now() % 2147483647) | 0, playerId: setup.char, playerRole: setup.role });
   Object.assign(ui, { tab: 'actions', talk: null, marks: {}, mirror: false, night: {} });
   render();
-  const r = role(G.playerId);
-  const reveal = [
-    { kind: 'panel', mood: 'night', sfx: 'CRACK-BOOM', caption: `A storm has sealed ${SETTING}. The gates won't open for three days. Six students are trapped inside.`, cast: [] },
-    { kind: 'panel', mood: 'role', color: r.color, sfx: r.sfx, caption: r.pitch, label: { title: r.name, sub: r.stat }, whisper: r.whisper, cast: [{ id: G.playerId, expr: me().role === 'yandere' ? 'yandere' : 'suspicious' }] },
-  ];
-  if (me().role === 'target') reveal.push({ kind: 'panel', mood: 'shock', sfx: 'GASP', caption: knownEvidence(G, G.playerId)[0].text, cast: [] });
-  await playBeats(reveal);
-  ui.brief = true;
+  await playBeats(introStory(), { skipLabel: 'Skip intro' });
   render();
 }
 
@@ -330,7 +378,6 @@ function render() {
       <aside class="side card">${G.phase === 'trial' ? trialPanel() : sidePanel()}</aside>
     </main>
     ${G.phase === 'night' && !ui.busy ? nightModal() : ''}
-    ${ui.brief && !ui.busy ? briefingModal() : ''}
   </div>`;
   bind();
   spawnWhispers();
@@ -348,39 +395,6 @@ function phaseTracker() {
   const cur = G.phase === 'day' ? `t${Math.min(G.tick, 3)}` : G.phase;
   const idx = steps.findIndex((s) => s.key === cur);
   return `<ol class="tracker" aria-label="Today">${steps.map((s, i) => `<li class="${i < idx ? 'done' : i === idx ? 'now' : ''}"><b>${esc(s.label)}</b><small>${esc(s.sub)}</small></li>`).join('')}</ol>`;
-}
-
-function briefingModal() {
-  const b = briefing(G, G.playerId);
-  const r = role(G.playerId);
-  const c = CHAR_BY_ID[G.playerId];
-  return `
-  <div class="modal brief">
-    <div class="modal-card brief-card" style="--role:${r.color}">
-      <div class="brief-head">
-        <div class="portrait-frame">${portraitSVG(G.playerId, me().role === 'yandere' ? 'yandere' : 'neutral')}</div>
-        <div>
-          <span class="sfx-oval">${esc(r.sfx)}</span>
-          <h2>${esc(r.name)}</h2>
-          <p class="muted">You are ${esc(c.name)}. Only you know this.</p>
-        </div>
-      </div>
-      <div class="goal"><span class="label-box">How you win</span><p>${esc(b.goal)}</p></div>
-      <h4>Your plan</h4>
-      <ol class="steps">${b.steps.map((st) => `<li>${esc(st)}</li>`).join('')}</ol>
-      <p class="lose">${icon('alert')} ${esc(b.lose)}</p>
-      <p class="lose">${icon('page')} You also have 3 tasks around the school (Actions tab). ${['yandere', 'accomplice'].includes(me().role) ? 'Yours are fake, but doing them makes you look innocent.' : 'Finish them for a clue about the killer.'}</p>
-      <h4>How each day works</h4>
-      <ol class="flow">
-        <li><b>4 turns</b><small>1 action each: move, talk, search or a room action</small></li>
-        <li><b>Class Trial</b><small>present clues, accuse, vote someone out</small></li>
-        <li><b>Night</b><small>sleep where you ended the day. Alone is dangerous</small></li>
-      </ol>
-      <h4>Room actions</h4>
-      <ul class="room-list">${ROOMS.map((rm) => `<li>${icon(rm.action.icon)}<div><b>${esc(rm.name)}</b><small>${esc(rm.action.desc)}</small></div></li>`).join('')}</ul>
-      <button class="btn primary big" id="briefOk">Got it, let's go</button>
-    </div>
-  </div>`;
 }
 
 function meter(label, v, cls, tag) {
@@ -488,27 +502,30 @@ function actionsTab() {
   for (const [id, v] of Object.entries(G.invites)) if (v.from === G.playerId && id !== G.playerId) plans.push(`${esc(nameOf(id))} will meet you in the ${esc(roomName(v.room))}.`);
   for (const o of G.offers) plans.push(`${esc(nameOf(o.from))} invited you to the ${esc(roomName(o.room))}.`);
   const tips = hints(G, G.playerId);
+  const fake = ['yandere', 'accomplice'].includes(p.role);
+  const doneCount = p.tasks.filter((t) => t.done).length;
   return `
-    <div class="hint-box">
-      <b>${icon('search')} What should I do?</b>
-      <ul>${tips.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>
+    <div class="next-step">
+      <span class="label-box">Next step</span>
+      <p>${esc(tips[0])}</p>
+      ${tips.length > 1 ? `<details><summary>More tips</summary><ul>${tips.slice(1).map((t) => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
     </div>
-    <p class="turn-note">Turn ${G.tick + 1} of 4: pick <b>one</b> action below, click a student to talk, or click a neighbouring room on the map to move.</p>
-    <div class="action-list">
-      ${acts.map((a) => `<button class="action-card ${a.danger ? 'danger' : ''} ${a.special ? 'special' : ''}" data-act="${a.type}" ${a.to ? `data-to="${a.to}"` : ''} ${a.disabled ? 'disabled' : ''}>
-        ${icon(a.icon)}<span><b>${esc(a.label)}</b><small>${esc(a.disabled ? a.reason : a.desc)}</small></span></button>`).join('')}
+    <div class="action-list compact">
+      ${acts.map((a) => `<button class="act ${a.danger ? 'danger' : ''} ${a.special ? 'special' : ''}" data-act="${a.type}" ${a.to ? `data-to="${a.to}"` : ''} ${a.disabled ? 'disabled' : ''} title="${esc(a.disabled ? a.reason : a.desc)}">
+        ${icon(a.icon)}<span>${esc(a.label)}${a.disabled ? `<small>${esc(a.reason)}</small>` : a.danger ? `<small>${esc(a.desc)}</small>` : ''}</span></button>`).join('')}
     </div>
-    <h4>Your tasks ${['yandere', 'accomplice'].includes(p.role) ? '<small class="muted">(fake: they make you look busy)</small>' : '<small class="muted">(finish all 3 for a clue)</small>'}</h4>
-    <ul class="task-list">${p.tasks.map((t) => `<li class="${t.done ? 'done' : ''} ${t.room === p.room && !t.done ? 'here' : ''}">${icon(t.done ? 'star' : 'page')}<span>${esc(t.label)}<small>${esc(roomName(t.room))}</small></span></li>`).join('')}</ul>
-    <h4>Inventory</h4>
-    ${p.items.length ? `<ul class="items">${p.items.map((it) => `
+    <p class="turn-note">Or click a student to talk, or a room on the map to move.</p>
+    <div class="mini-section">
+      <h4>Tasks <b class="count">${doneCount}/${p.tasks.length}</b> ${fake ? '<small>fake</small>' : '<small>all 3 = a clue</small>'}</h4>
+      <ul class="task-list">${p.tasks.map((t) => `<li class="${t.done ? 'done' : ''} ${t.room === p.room && !t.done ? 'here' : ''}"><i class="tick">${t.done ? icon('star') : ''}</i>${esc(t.label)} <small>${esc(roomName(t.room))}</small></li>`).join('')}</ul>
+    </div>
+    ${p.items.length ? `<h4>Inventory</h4><ul class="items">${p.items.map((it) => `
       <li><span class="item-icon">${icon(ITEMS[it].icon)}</span><div><b>${esc(ITEMS[it].name)}</b><small>${esc(ITEMS[it].desc)}</small>
         ${ITEMS[it].usable ? (ITEMS[it].needsTarget
           ? (ui.mirror ? `<div class="chip-row">${here.map((id) => `<button class="chip-btn" data-use="${it}" data-arg="${id}">${esc(nameOf(id))}</button>`).join('') || '<small>Nobody here.</small>'}</div>` : `<button class="btn small" data-pick-mirror>Use on…</button>`)
           : `<button class="btn small" data-use="${it}">Use</button>`) : ''}
-      </div></li>`).join('')}</ul>` : '<p class="muted">Empty pockets. Search rooms to find items.</p>'}
-    <h4>Tonight</h4>
-    ${plans.length ? `<ul class="plain">${plans.map((x) => `<li>${x}</li>`).join('')}</ul>` : `<p class="muted">No plans. You'll sleep wherever you end the day: currently the ${esc(roomName(p.room))}.</p>`}`;
+      </div></li>`).join('')}</ul>` : ''}
+    ${plans.length || G.tick >= 2 ? `<h4>Tonight</h4>${plans.length ? `<ul class="plain">${plans.map((x) => `<li>${x}</li>`).join('')}</ul>` : `<p class="muted small">No plans yet. You'll sleep in the ${esc(roomName(p.room))}.</p>`}` : ''}`;
 }
 
 function notesTab() {
@@ -706,7 +723,6 @@ function bind() {
   $$('.talk-menu [data-arg]', (el) => act({ type: 'talk', to: ui.talk.to, option: ui.talk.option, arg: el.dataset.arg }));
   $$('[data-tab]', (el) => { ui.tab = el.dataset.tab; render(); });
   $$('[data-act]', (el) => { if (!el.disabled) act({ type: el.dataset.act, to: el.dataset.to }); });
-  $$('#briefOk', () => { ui.brief = false; render(); });
   bindVoiceToggle(app);
   $$('[data-pick-mirror]', () => { ui.mirror = true; render(); });
   $$('[data-use]', (el) => act({ type: 'use', item: el.dataset.use, arg: el.dataset.arg }));
@@ -715,7 +731,7 @@ function bind() {
     ui.marks[id] = { undefined: 'sus', sus: 'trust', trust: undefined }[ui.marks[id]];
     render();
   });
-  $$('#roleBadge', () => { const r = role(G.playerId); playBeats([{ kind: 'panel', mood: 'role', color: r.color, sfx: r.sfx, label: { title: r.name, sub: r.stat }, caption: objectiveText(G, G.playerId), cast: [{ id: G.playerId, expr: 'neutral' }] }]); });
+  $$('#roleBadge', async () => { await playBeats(introStory({ full: false }), { skipLabel: 'Close' }); render(); });
   // Trial
   $$('[data-present]', (el) => run(() => presentEvidence(G, el.dataset.present)));
   $$('[data-accuse]', (el) => run(() => accuse(G, el.dataset.accuse)));

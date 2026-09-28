@@ -590,3 +590,49 @@ body.busy .side, body.busy .map-panel { pointer-events: none; opacity: .7; }
   .tracker small { display: none; }
   .flow, .room-list { grid-template-columns: 1fr; }
 }
+
+/* ---------- Story intro & spot art ---------- */
+.subpanel.art { display: grid; place-items: center; }
+.spot-art { position: relative; z-index: 1; width: min(78%, 300px); height: auto; max-height: 92%;
+  filter: drop-shadow(5px 5px 0 #2a2030); animation: artIn .45s cubic-bezier(.2, 1.5, .4, 1); }
+@keyframes artIn { from { transform: scale(.6) rotate(-8deg); opacity: 0; } }
+.cast-2 .spot-art, .cast-3 .spot-art { width: min(90%, 240px); }
+.webtoon.story { animation: storyIn .35s cubic-bezier(.2, 1.2, .4, 1); }
+@keyframes storyIn { from { transform: translateX(40px) rotate(1.5deg); opacity: 0; } }
+.story-count {
+  position: absolute; left: -12px; top: -14px; z-index: 4; background: var(--label); border: 2.5px solid var(--line);
+  border-radius: 99px; padding: 1px 10px; font-weight: 800; font-size: .8rem; box-shadow: 2px 2px 0 var(--line);
+}
+.webtoon.story .caption { font-size: 1.12rem; line-height: 1.45; }
+.skip-btn.big {
+  font-size: .85rem !important; padding: 4px 14px !important; border: 2.5px solid var(--line) !important; border-radius: 99px !important;
+  background: var(--crimson); color: #fff; font-weight: 800; box-shadow: 2px 2px 0 var(--line);
+}
+.webtoon.story .continue { display: flex; align-items: center; justify-content: flex-end; gap: 6px; animation: none; }
+
+/* ---------- Cleaner actions panel ---------- */
+.next-step { background: #eef6ff; border: 2px solid var(--line); border-radius: 12px; padding: 8px 10px 6px; box-shadow: 3px 3px 0 var(--blue); }
+.next-step .label-box { display: inline-block; font-size: .7rem; padding: 1px 8px; }
+.next-step p { margin: 6px 0 2px; font-weight: 700; font-size: .92rem; }
+.next-step details summary { margin-top: 2px; font-size: .75rem; color: var(--muted); font-weight: 700; }
+.next-step ul { margin: 4px 0 0; padding-left: 1.1em; font-size: .82rem; }
+.action-list.compact { display: grid; grid-template-columns: 1fr; gap: 5px; margin-top: 10px; }
+.act {
+  display: flex; align-items: center; gap: 8px; text-align: left; background: #fff; border: 2px solid var(--line); border-radius: 10px;
+  padding: 6px 10px; font-weight: 800; font-size: .88rem; box-shadow: 2px 2px 0 var(--line);
+}
+.act:hover:not(:disabled) { background: #ffe8f1; }
+.act .ic { width: 20px; height: 20px; }
+.act small { display: block; font-weight: 400; color: var(--muted); font-size: .72rem; }
+.act.special { background: var(--label); }
+.act.danger { background: var(--crimson); color: #fff; animation: pulse 1.2s infinite; }
+.act.danger small { color: #ffe3ea; }
+.act:disabled { opacity: .5; cursor: not-allowed; }
+.turn-note { font-size: .75rem; margin: 6px 0 4px; }
+.mini-section h4 { display: flex; align-items: center; gap: 6px; }
+.mini-section h4 .count { color: var(--ink); letter-spacing: 0; }
+.mini-section h4 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.task-list li { padding: 3px 8px; font-size: .8rem; display: flex; align-items: center; gap: 6px; }
+.task-list li small { display: inline; margin-left: auto; font-size: .7rem; }
+.task-list .tick { width: 14px; height: 14px; border: 2px solid var(--line); border-radius: 4px; display: grid; place-items: center; flex: none; font-style: normal; }
+.task-list .tick .ic { width: 10px; height: 10px; color: #27ae60; }
