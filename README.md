@@ -15,6 +15,27 @@ npm start            # zero-dependency Node server (tools/serve.js)
 
 If port 8000 is taken, the server moves to the next free port and prints the URL. Any static server works (`npx serve`, VS Code Live Server, …).
 
+## Voices (ElevenLabs)
+
+Every student has a different voice, plus a narrator. The browser never sees your key: the local server calls ElevenLabs and caches each line in `.cache/tts/`, so repeated lines are free.
+
+```bash
+cp .env.example .env      # then paste your key after ELEVENLABS_API_KEY=
+npm start                 # prints "Voices: ON"
+```
+
+| Character | ElevenLabs voice | Why |
+|---|---|---|
+| Hana | Jessica | bright, playful, bubbly idol energy |
+| Reina | Alice | crisp, confident British heiress |
+| Kaito | Liam | quick, articulate puzzle-solver |
+| Momo | Sarah | soft, gentle, a little nervous |
+| Ren | Callum | low, husky, says very little |
+| Yuki | River | calm, even, deadpan |
+| Narrator | George | warm storyteller |
+
+Delivery changes with each line's expression. The yandere face, for example, gets a less stable and more dramatic read. To swap a voice, set `VOICE_<NAME>=<voice id>` in `.env`, or edit `src/voices.js`. Use the Voices button in the top bar to turn them off. The server only listens on localhost because it spends your credits.
+
 ## Test it
 
 ```bash
@@ -24,9 +45,14 @@ npm run simulate -- 2000    # bot-only matches -> win rate per role
 
 ## How a match plays
 
+**Roles are shuffled every match.** Any student can be anything, and faces, voices and reactions never give it away. At the start you get a briefing that explains exactly how to win with the role you drew. You can reopen it from your role badge.
+
 | Phase | What happens |
 |---|---|
-| **Day** (4 periods) | Each period you take one action: move to a neighbouring room, talk to someone in your room, search, use an item or a role ability. Everyone else acts at the same time. You can only see your own room and the rooms next to it. |
+| **Day** (4 turns: Morning, Lunch, After School, Dusk) | Each turn you take one action: move to a neighbouring room, talk to someone in your room, search, do a task, or use the room's special action. Everyone else acts at the same time. You can only see your own room and the rooms next to it. A progress bar at the top shows where you are in the day. |
+| **Rooms** | Library: the gossip archive clears one innocent per day. Classroom: the security monitor shows where everyone is. Music Room: rehearse to build trust; it's soundproof. Infirmary: wash off blood and rest. Courtyard: ring the emergency bell to call a trial. Dorm Hall: barricade your door for one night. |
+| **Timetable & tasks** | Everyone follows a public timetable (in the Notebook) and has 3 tasks in other rooms. After School, most people are alone in their clubs, which is when the killer strikes. Finishing your tasks earns a clue. If the whole class finishes, the cameras reveal the killer's build to everyone. |
+| **Murder** | The Obsessive can **stab** anyone they're alone with once they have 30 Obsession (an animated cutscene), or strike at night. Killing leaves them bloody until they wash, and screams carry to neighbouring rooms. A found body triggers an **emergency trial**. |
 | **Talk** | These are visual-novel dialogue choices. *Chat* (pick an expression: Smile, Blush, Smirk or Stare) builds trust. You can also ask about last night, share a suspicion, or invite someone to spend the night with you, which decides where you both sleep. |
 | **Class Trial** | Everyone gives a statement, bots included. You can present up to two clues, accuse one person, then vote. A plurality with at least two votes, and more votes than abstentions, expels someone into the storm. |
 | **Night** | Everyone sleeps where they ended the day or where they agreed to meet. The Obsessive can slip out and strike anyone who is sleeping without witnesses. The Detective can stake out a room. |
@@ -53,7 +79,7 @@ Every clue points at a trait: **hair colour** (pink, black or golden) or **build
 - Eyewitnesses when an attack is foiled.
 - Roommates who noticed someone's futon was empty.
 
-Alibis, collected by asking people about last night, are the other half of the puzzle.
+Testimony is the other half of the puzzle. Friendly chats get people telling you who they saw and where. Ask for an alibi and they walk through last night and every turn today. Innocents tell the truth. The Obsessive lies about the turn they killed in, and the Accomplice claims to have been with them. Compare the stories with the timetable, the cameras and each other.
 
 ## Code map
 
@@ -64,6 +90,10 @@ src/core.js               seeded RNG, map geometry, lookups
 src/engine.js             rules: state machine, actions, trial, night, win conditions
 src/ai.js                 role-driven bot heuristics
 src/portraits.js          procedural SVG anime portraits (6 students x 7 expressions)
+src/icons.js              hand-drawn style line icons (no emoji)
+src/lines.js              per-character dialogue (same pools for guilty and innocent)
+src/voices.js, voice.js   ElevenLabs casting + browser playback
+tools/serve.js            local server + ElevenLabs relay (key stays server-side)
 src/main.js               UI: rendering, input, beat playback (panels + dialogue)
 tests/engine.test.js      rules tests
 tools/simulate.js         balance harness

@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   createGame, autoplayStep, castVote, resolveNight, playerAct, applyAction, learn, computeWinners, nightOptions,
+  stabVictim, accuse, STAB_OBSESSION,
 } from '../src/engine.js';
-import { CHARACTERS, ROLE_ORDER } from '../src/data.js';
+import { CHARACTERS, ROLE_ORDER, ROOMS } from '../src/data.js';
 import { path, matchesEvidence } from '../src/core.js';
 
 function playOut(g) {
@@ -186,4 +187,91 @@ test('chatting with the beloved feeds the Obsessive; rivals nearby drain sanity'
   assert.equal(g.chars.hana.sanity, 60);
   applyAction(g, g.plot.target, { type: 'talk', to: bel, option: 'chat', arg: 'smile' });
   assert.equal(g.chars.hana.sanity, 52, 'jealousy costs sanity');
+});
+
+// ---------------------------------------------------------------------------
+// Stabbing, bodies, alibis, tasks
+
+function dayScenario(seed = 21) {
+  const g = createGame({ seed, playerId: 'hana', playerRole: 'yandere' });
+  const victim = g.order.find((id) => ![g.plot.yandere, g.plot.accomplice].includes(id));
+  for (const id of g.order) g.chars[id].room = 'dorm';
+  g.chars.hana.room = 'music';
+  g.chars[victim].room = 'music';
+  return { g, victim };
+}
+
+test('the beloved is never the Obsessive\'s own accomplice', () => {
+  for (let seed = 1; seed <= 200; seed++) {
+    const g = createGame({ seed, playerId: null });
+    assert.notEqual(g.plot.beloved, g.plot.accomplice, `seed ${seed}`);
+  }
+});
+
+test('Stab needs enough Obsession and no witnesses', () => {
+  const { g, victim } = dayScenario();
+  g.chars.hana.obsession = STAB_OBSESSION - 1;
+  assert.equal(stabVictim(g, 'hana'), null, 'not obsessed enough yet');
+  g.chars.hana.obsession = STAB_OBSESSION;
+  assert.equal(stabVictim(g, 'hana'), victim);
+  const witness = g.order.find((id) => ![g.plot.yandere, g.plot.accomplice, victim].includes(id));
+  g.chars[witness].room = 'music';
+  assert.equal(stabVictim(g, 'hana'), null, 'a witness blocks it');
+});
+
+test('a stab kills, leaves the killer bloody, and a found body calls an emergency trial', () => {
+  const { g, victim } = dayScenario();
+  g.chars.hana.obsession = 40;
+  const beats = applyAction(g, 'hana', { type: 'stab', to: victim });
+  assert.ok(beats.some((b) => b.kind === 'kill' && b.pov === 'killer'));
+  assert.equal(g.chars[victim].alive, false);
+  assert.equal(g.chars.hana.bloody, true);
+  const body = g.bodies.at(-1);
+  assert.equal(body.found, false);
+  // Someone walks in; at the end of the turn they report it.
+  const finder = g.order.find((id) => id !== 'hana' && g.chars[id].alive);
+  g.chars.hana.room = 'dorm';
+  g.chars[finder].room = 'music';
+  playerAct(g, { type: 'wait' });
+  if (g.phase !== 'over') {
+    assert.ok(body.found, 'body reported');
+    assert.equal(g.phase, 'trial');
+    assert.equal(g.trial.emergency, true);
+  }
+});
+
+test('the Obsessive lies about where they were when they killed', () => {
+  const { g, victim } = dayScenario(33);
+  g.chars.hana.obsession = 40;
+  applyAction(g, 'hana', { type: 'stab', to: victim });
+  g.history.push({ day: g.day, tick: g.tick, rooms: { hana: 'music' } });
+  const claimed = CHARACTERS.find((c) => c.id === 'hana').schedule[g.tick];
+  g.tick += 1;
+  const listener = g.order.find((id) => id !== 'hana' && g.chars[id].alive);
+  g.chars[listener].room = g.chars.hana.room;
+  applyAction(g, listener, { type: 'talk', to: 'hana', option: 'alibi' });
+  const claim = g.chars[listener].notes.at(-1).text;
+  assert.match(claim, new RegExp(`Morning: ${ROOMS.find((r) => r.id === claimed).name}, alone`));
+  assert.doesNotMatch(claim, /Morning: Music Room/);
+});
+
+test('guilty and innocent students react to accusations the same way', () => {
+  const g = createGame({ seed: 8, playerId: 'hana', playerRole: 'detective' });
+  g.phase = 'trial';
+  g.trial = { day: 1, final: false, presented: 0, accused: false };
+  const beats = accuse(g, g.plot.yandere);
+  const reply = beats.find((b) => b.kind === 'line' && b.speaker === g.plot.yandere);
+  assert.equal(reply.expr, 'shocked');
+});
+
+test('finishing all your tasks earns a real clue about the killer', () => {
+  const g = createGame({ seed: 12, playerId: 'hana', playerRole: 'detective' });
+  for (const t of g.chars.hana.tasks) {
+    g.chars.hana.room = t.room;
+    applyAction(g, 'hana', { type: 'task' });
+  }
+  assert.ok(g.chars.hana.tasks.every((t) => t.done));
+  const lead = g.evidence.find((e) => e.kind === 'lead');
+  assert.ok(lead && lead.knownBy.includes('hana'));
+  assert.ok(matchesEvidence(g.plot.yandere, lead));
 });

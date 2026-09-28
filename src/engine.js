@@ -5,16 +5,18 @@
 // Match flow:  Day (4 periods) -> Class Trial -> Night -> next Day ...
 // The Trial on the last day is the Final Trial and ends the match.
 
-import { CHARACTERS, ROLE_ORDER, ROLES, ROOMS, ITEMS, TONES, TRAIT_TEXT, PERIODS } from './data.js';
+import { CHARACTERS, ROLE_ORDER, ROLES, ROOMS, ITEMS, TONES, TRAIT_TEXT, PERIODS, TASKS, TASKS_PER_STUDENT } from './data.js';
 import {
   rand, chance, pick, shuffle, clamp, adjacent, path, nameOf, roomName,
   active, activeIds, occupants, matchesEvidence, CHAR_BY_ID, ROOM_BY_ID,
 } from './core.js';
 import * as ai from './ai.js';
+import { lineFor } from './lines.js';
 
 export const MAX_PRESENTS = 2;
 const INVITE_TRUST = 45;
 const ROMANCE_TRUST = 85;
+export const STAB_OBSESSION = 30;
 const ISOLATED_ROOMS = ROOMS.filter((r) => !r.camera).map((r) => r.id);
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,11 @@ export function createGame({ seed = Date.now(), playerId = 'hana', playerRole = 
     trial: null,
     nightReport: null,
     expelled: [],
+    bodies: [], // { victim, room, day, killer, found }
+    alarm: null, // { room, heardBy, tick } — a scream this turn
+    pendingMeeting: null,
+    history: [], // { day, tick, rooms } snapshot at the end of every turn
+    powerRestored: false,
     log: [],
     winners: null,
   };
@@ -70,6 +77,13 @@ export function createGame({ seed = Date.now(), playerId = 'hana', playerRole = 
       notes: [],
       stalkedToday: false,
       confessed: false,
+      bloody: false,
+      usedBell: false,
+      usedLock: false,
+      barricadeDay: 0,
+      researchedDay: 0,
+      cleared: [],
+      camSnapshot: null,
     };
   });
   for (const a of state.order) {
@@ -88,9 +102,15 @@ export function createGame({ seed = Date.now(), playerId = 'hana', playerRole = 
   p.target = byRole('target');
   p.socialite = byRole('socialite');
   p.romantic = byRole('romantic');
-  p.beloved = pick(state, state.order.filter((id) => ![p.yandere, p.target, p.romantic].includes(id)));
+  p.beloved = pick(state, state.order.filter((id) => ![p.yandere, p.accomplice, p.target, p.romantic].includes(id)));
   p.crush = p.beloved;
   p.frameTarget = pick(state, state.order.filter((id) => id !== p.socialite));
+
+  // Chores: three rooms each, never the room you start in.
+  for (const id of state.order) {
+    const rooms = shuffle(state, ROOMS.map((r) => r.id).filter((r) => r !== state.chars[id].room)).slice(0, TASKS_PER_STUDENT);
+    state.chars[id].tasks = rooms.map((room) => ({ room, label: TASKS[room], done: false }));
+  }
 
   // Secret knowledge.
   const Y = state.chars[p.yandere];
@@ -201,8 +221,12 @@ const trustBump = (state, who, of, by) => { state.chars[who].trust[of] = clamp(s
 // Beats: the UI plays these back as panels and dialogue.
 
 const line = (speaker, expr, text) => ({ kind: 'line', speaker, expr, text });
+const voiceLine = (state, id, kind, vars) => lineFor(state, () => rand(state), id, kind, vars);
 const narrate = (text) => ({ kind: 'narrate', text });
 const panel = (o) => ({ kind: 'panel', mood: 'neutral', cast: [], ...o });
+// Animated stab cutscene and crime-scene reveal (see main.js).
+const killBeat = (killer, victim, room, pov) => ({ kind: 'kill', killer, victim, room, pov });
+const sceneBeat = (victim, room, caption) => ({ kind: 'scene', victim, room, caption });
 
 // ---------------------------------------------------------------------------
 // Day actions
@@ -229,15 +253,43 @@ export function playerActions(state) {
   const c = state.chars[id];
   const acts = [];
   if (!active(state, id) || state.phase !== 'day') return acts;
-  acts.push({ type: 'search', label: 'Search the room' });
+  const stab = stabVictim(state, id);
+  if (stab) acts.push({ type: 'stab', to: stab, icon: 'knife', label: `Stab ${nameOf(stab)}`, desc: 'Nobody else is watching. Do it now.', danger: true });
+  const task = c.tasks.find((t) => !t.done && t.room === c.room);
+  if (task) acts.push({ type: 'task', icon: 'page', label: `Task: ${task.label}`, desc: ['yandere', 'accomplice'].includes(c.role) ? 'Fake task: it only makes you look busy.' : 'Finish all your tasks to earn a clue.', special: true });
+  const ra = roomAction(state, id);
+  acts.push({ type: 'room', icon: ra.icon, label: ra.label, desc: ra.desc, disabled: !ra.ok, reason: ra.reason, special: true });
+  acts.push({ type: 'search', icon: 'search', label: 'Search the room', desc: 'Look for items and hidden clues.' });
   if (c.role === 'yandere' && c.obsession >= 50 && !c.stalkedToday && state.chars[state.plot.target].alive) {
-    acts.push({ type: 'stalk', label: `Stalk ${nameOf(state.plot.target)}` });
+    acts.push({ type: 'stalk', icon: 'eye', label: `Stalk ${nameOf(state.plot.target)}`, desc: 'Learn exactly where your target and your beloved are.' });
   }
   if ((c.role === 'yandere' || c.role === 'accomplice') && findable(state, c.room, '__nobody__').length) {
-    acts.push({ type: 'coverup', label: 'Cover up evidence' });
+    acts.push({ type: 'coverup', icon: 'sponge', label: 'Cover up evidence', desc: 'Destroy a hidden clue in this room. Someone may notice.' });
   }
-  acts.push({ type: 'wait', label: 'Keep watch (wait)' });
+  acts.push({ type: 'wait', icon: 'hourglass', label: 'Keep watch (wait)', desc: 'Do nothing and see who comes and goes.' });
   return acts;
+}
+
+// The Obsessive can stab someone when they are alone with them (an Accomplice
+// in the room doesn't count as a witness). Returns the victim id or null.
+export function stabVictim(state, id) {
+  const c = state.chars[id];
+  if (!c || c.role !== 'yandere' || !active(state, id) || state.phase !== 'day' || c.obsession < STAB_OBSESSION) return null;
+  const others = occupants(state, c.room).filter((o) => o !== id && o !== state.plot.accomplice);
+  return others.length === 1 ? others[0] : null;
+}
+
+// The special action of the room `id` is standing in, and whether it's usable.
+export function roomAction(state, id) {
+  const c = state.chars[id];
+  const r = ROOM_BY_ID[c.room];
+  const a = { ...r.action, ok: true, reason: '' };
+  const others = occupants(state, c.room).filter((o) => o !== id);
+  if (a.id === 'research' && c.researchedDay === state.day) Object.assign(a, { ok: false, reason: 'Already used today.' });
+  if (a.id === 'rehearse' && !others.length) Object.assign(a, { ok: false, reason: 'Nobody here to rehearse with.' });
+  if (a.id === 'bell' && c.usedBell) Object.assign(a, { ok: false, reason: 'You already rang the bell this match.' });
+  if (a.id === 'lock' && c.usedLock) Object.assign(a, { ok: false, reason: 'You already barricaded once this match.' });
+  return a;
 }
 
 // The player takes one action; every bot then takes one; then time advances.
@@ -277,6 +329,15 @@ export function applyAction(state, id, action) {
       break;
     case 'use':
       beats.push(...applyUse(state, id, action.item, action.arg));
+      break;
+    case 'stab':
+      beats.push(...applyStab(state, id, action.to));
+      break;
+    case 'room':
+      beats.push(...applyRoomAction(state, id));
+      break;
+    case 'task':
+      beats.push(...applyTask(state, id));
       break;
     case 'stalk': {
       if (c.obsession < 50 || c.stalkedToday) break;
@@ -348,8 +409,15 @@ function applyTalk(state, speaker, listener, option, arg) {
         smirk: ['Relax. I\'ve got everything under control.', 'Scared? Don\'t be. Not while I\'m around.'],
         stare: ['…', 'You smell like rain. I like it.', 'I watch you, you know. Every day.'],
       }[tone]));
-      say(listener, react, delta >= 5 ? pick(state, ['Thanks… that actually helps.', 'Heh. You\'re not so bad.', 'Stay close, okay?'])
-        : delta > 0 ? 'Uh… okay?' : 'Why are you looking at me like that…?');
+      say(listener, react, voiceLine(state, listener, delta >= 5 ? 'warm' : 'cold'));
+      // Friendly chats loosen tongues: they tell you something they saw.
+      if (delta >= 5 && (isPlayer || toPlayer) && chance(state, 0.75)) {
+        const seen = sighting(state, listener);
+        if (seen) {
+          say(listener, 'neutral', seen);
+          if (isPlayer) note(state, speaker, `${nameOf(listener)} says: "${seen}"`);
+        }
+      }
       if (speaker === state.plot.yandere && listener === state.plot.beloved) { S.obsession = clamp(S.obsession + 10); S.sanity = clamp(S.sanity + 10); }
       if (witness) beats.push(narrate(`${Sn} chats with ${nameOf(listener)}${tone === 'stare' ? ', staring without blinking' : ''}.`));
       jealousy(state, speaker, listener, 8, beats);
@@ -359,7 +427,7 @@ function applyTalk(state, speaker, listener, option, arg) {
       trustBump(state, listener, speaker, -2);
       const text = alibiClaim(state, listener);
       note(state, speaker, `${nameOf(listener)} claims: "${text}"`);
-      say(speaker, 'neutral', 'Where were you last night? Be honest.');
+      say(speaker, 'neutral', 'Walk me through it. Where were you, and who were you with?');
       say(listener, 'suspicious', text);
       if (witness) beats.push(narrate(`${Sn} questions ${nameOf(listener)} about last night.`));
       break;
@@ -381,7 +449,7 @@ function applyTalk(state, speaker, listener, option, arg) {
       say(speaker, 'suspicious', option === 'rumor'
         ? `Don't repeat this, but I heard ${nameOf(arg)} was sneaking around after curfew…`
         : `Have you noticed how ${nameOf(arg)} acts? Something's off.`);
-      say(listener, 'suspicious', trustOf >= 40 ? `…Now that you mention it. I'll keep an eye on ${nameOf(arg)}.` : 'Why should I believe you?');
+      say(listener, 'suspicious', voiceLine(state, listener, trustOf >= 40 ? 'agree' : 'doubt', { x: nameOf(arg) }));
       if (toPlayer) note(state, state.playerId, `${Sn} warned you about ${nameOf(arg)}.`);
       if (witness && option === 'suspect') beats.push(narrate(`You overhear ${Sn} whispering about ${nameOf(arg)}.`));
       break;
@@ -399,10 +467,10 @@ function applyTalk(state, speaker, listener, option, arg) {
       if (accepts) {
         state.invites[listener] = { room, from: speaker };
         state.invites[speaker] = { room, from: speaker };
-        say(listener, 'happy', `Okay. The ${roomName(room)}. I'll be there.`);
+        say(listener, 'happy', `${voiceLine(state, listener, 'yes')} The ${roomName(room)} it is.`);
         if (isPlayer) note(state, speaker, `${nameOf(listener)} agreed to spend the night with you in the ${roomName(room)}.`);
       } else {
-        say(listener, 'suspicious', 'I… don\'t think so. Sorry.');
+        say(listener, 'suspicious', voiceLine(state, listener, 'no'));
       }
       if (witness) beats.push(narrate(`${Sn} asks ${nameOf(listener)} something quietly. ${accepts ? 'They nod.' : 'They shake their head.'}`));
       break;
@@ -416,10 +484,10 @@ function applyTalk(state, speaker, listener, option, arg) {
       if (tell) {
         const ev = addEvidence(state, { kind: 'tell', subject: L.role === 'yandere' ? listener : state.plot.yandere, strength: 25, night: state.day, where: null, text: tell });
         learn(state, speaker, ev);
-        say(listener, L.role === 'yandere' ? 'yandere' : 'shocked', L.role === 'yandere' ? '…Why would you bring them up? Hm? Why?' : 'I-I don\'t know anything!');
-        if (isPlayer) beats.push(panel({ mood: 'shock', sfx: 'TWITCH', caption: tell, cast: [{ id: listener, expr: 'yandere' }] }));
+        say(listener, 'shocked', voiceLine(state, listener, 'defend'));
+        if (isPlayer) beats.push(panel({ mood: 'shock', sfx: '*TWITCH*', caption: tell, cast: [{ id: listener, expr: 'suspicious' }] }));
       } else {
-        say(listener, 'neutral', 'I\'m as scared as you are. Leave me alone.');
+        say(listener, 'shocked', voiceLine(state, listener, 'defend'));
         if (isPlayer) beats.push(narrate('No tells. Either they\'re innocent, or very good.'));
       }
       break;
@@ -462,18 +530,63 @@ function jealousy(state, speaker, listener, amount, beats) {
   }
 }
 
+// What `id` claims about last night and today's turns. Innocents tell the
+// truth. The Obsessive lies about the turn (or night) they killed in, and the
+// Accomplice claims to have been with them then. Lies show up as
+// contradictions with the timetable, cameras and other people's stories.
 function alibiClaim(state, id) {
-  const report = state.nightReport;
-  if (!report) return 'Last night? We only got locked in today. I was in class like everyone else.';
   const c = state.chars[id];
-  const liar = c.role === 'yandere' || c.role === 'accomplice';
-  const actual = report.rooms[id];
-  if (!actual) return 'I… don\'t want to talk about it.';
-  if (liar && report.attacker === id) {
-    return `I slept in the ${roomName(report.claimedRoom ?? actual)}. Didn't leave once. Ask anyone.`;
+  const p = state.plot;
+  const parts = [];
+  const report = state.nightReport;
+  if (report && report.night === state.day - 1 && report.rooms[id]) {
+    let room = report.rooms[id];
+    if (id === report.attacker && report.claimedRoom) room = report.claimedRoom;
+    const mates = Object.keys(report.rooms).filter((o) => o !== id && report.rooms[o] === room && state.chars[o].alive && o !== report.attacker);
+    if (c.role === 'accomplice' && report.attacker) mates.push(report.attacker);
+    parts.push(`Last night I slept in the ${roomName(room)}${mates.length ? ` with ${[...new Set(mates)].map(nameOf).join(' and ')}` : ', alone'}.`);
   }
-  const withWho = Object.keys(report.rooms).filter((o) => o !== id && report.rooms[o] === actual && state.chars[o].alive);
-  return `I was in the ${roomName(actual)} all night${withWho.length ? ` with ${withWho.map(nameOf).join(' and ')}` : ', alone'}.`;
+  const today = state.history.filter((h) => h.day === state.day);
+  const killTicks = state.bodies.filter((b) => b.killer === p.yandere && b.day === state.day && b.tick != null).map((b) => b.tick);
+  const turns = today.map((h) => {
+    let room = h.rooms[id];
+    if (!room) return null;
+    let mates = Object.keys(h.rooms).filter((o) => o !== id && h.rooms[o] === room);
+    if (id === p.yandere && killTicks.includes(h.tick)) {
+      room = CHAR_BY_ID[id].schedule[h.tick];
+      mates = [];
+    }
+    if (id === p.accomplice && killTicks.includes(h.tick)) mates = [...new Set([...mates, p.yandere])];
+    return `${PERIODS[h.tick]}: ${ROOM_BY_ID[room].name}${mates.length ? ` with ${mates.map(nameOf).join(', ')}` : ', alone'}`;
+  }).filter(Boolean);
+  if (turns.length) parts.push(`Today, ${turns.join('; ')}.`);
+  if (!parts.length) return 'We only just got locked in. I\'ve been following the timetable like everyone else.';
+  return parts.join(' ');
+}
+
+// Something `id` "saw". True for innocents; the Obsessive's team sometimes
+// invents a sighting that puts their scapegoat at the latest murder.
+function sighting(state, id) {
+  const c = state.chars[id];
+  const p = state.plot;
+  const team = c.role === 'yandere' || c.role === 'accomplice';
+  const body = state.bodies.filter((b) => b.day === state.day && b.found).at(-1);
+  if (team && body && chance(state, 0.6)) {
+    const sg = ai.scapegoat(state, id).id;
+    if (sg && sg !== id) return `I saw ${nameOf(sg)} near the ${roomName(body.room)} right around when it happened. Just saying.`;
+  }
+  const pool = state.history.filter((h) => h.rooms[id] && (h.day === state.day || h.day === state.day - 1)).slice(-6);
+  const h = pick(state, pool);
+  if (!h) return null;
+  const room = h.rooms[id];
+  const mates = Object.keys(h.rooms).filter((o) => o !== id && h.rooms[o] === room);
+  const when = `${h.day === state.day ? '' : 'Yesterday '}${PERIODS[h.tick]}`.trim();
+  if (!mates.length) {
+    // They were alone, but may have seen who passed through next door.
+    const passer = Object.keys(h.rooms).find((o) => o !== id && adjacent(h.rooms[o], room));
+    return passer ? `At ${when} I was alone in the ${roomName(room)}, and I saw ${nameOf(passer)} in the ${roomName(h.rooms[passer])} next door.` : `At ${when} I was alone in the ${roomName(room)}. Didn't see a soul.`;
+  }
+  return `At ${when} I was in the ${roomName(room)} with ${mates.map(nameOf).join(' and ')}.`;
 }
 
 function applySearch(state, id) {
@@ -491,7 +604,7 @@ function applySearch(state, id) {
   if (item && chance(state, det ? 0.9 : 0.6)) {
     state.roomItems[c.room] = null;
     c.items.push(item);
-    if (isPlayer) beats.push(panel({ mood: 'neutral', sfx: 'FOUND', caption: `${ITEMS[item].icon} ${ITEMS[item].name}: ${ITEMS[item].desc}` }));
+    if (isPlayer) beats.push(panel({ mood: 'neutral', sfx: 'FOUND', caption: `${ITEMS[item].name}: ${ITEMS[item].desc}`, icon: ITEMS[item].icon }));
   }
   if (isPlayer && !beats.length) beats.push(narrate(pick(state, ['Dust. Rain. Nothing useful.', 'You turn the room over and find nothing.', 'Nothing… or you missed it.'])));
   if (!isPlayer && active(state, state.playerId) && state.chars[state.playerId].room === c.room) {
@@ -548,6 +661,144 @@ function applyUse(state, id, item, arg) {
   return beats;
 }
 
+function applyStab(state, id, victim) {
+  if (stabVictim(state, id) !== victim) return [];
+  const c = state.chars[id];
+  const V = state.chars[victim];
+  const p = state.plot;
+  const room = c.room;
+  const beats = [];
+  const pid = state.playerId;
+  if (id === pid) beats.push(killBeat(id, victim, room, 'killer'));
+  if (victim === pid) beats.push(killBeat(id, victim, room, 'victim'));
+  V.alive = false;
+  state.bodies.push({ victim, room, day: state.day, tick: state.tick, killer: id, found: false });
+  state.crimeScenes.push({ day: state.day, room, victim });
+  const silent = c.obsession >= 80;
+  c.bloody = !silent || chance(state, 0.5);
+  c.sanity = victim === p.target ? 100 : clamp(c.sanity + 30);
+  const hair = CHAR_BY_ID[id].hair;
+  const build = CHAR_BY_ID[id].build;
+  if (!silent) {
+    if (chance(state, 0.6)) addEvidence(state, { kind: 'hair', trait: 'hair', value: hair, strength: 20, night: state.day, where: room,
+      text: `A strand of ${TRAIT_TEXT.hair[hair]} clutched in ${nameOf(victim)}'s hand (${roomName(room)}).` });
+    if (chance(state, 0.5)) addEvidence(state, { kind: 'footprint', trait: 'build', value: build, strength: 15, night: state.day, where: room,
+      text: `${build === 'tall' ? 'Large' : 'Small'} bloody footprints leading away from ${nameOf(victim)}'s body (${roomName(room)}).` });
+  }
+  // A scream carries to the neighbouring rooms, unless the room is soundproof.
+  if (!ROOM_BY_ID[room].soundproof) {
+    const heardBy = activeIds(state).filter((o) => o !== id && adjacent(state.chars[o].room, room));
+    state.alarm = { room, heardBy, tick: state.tick };
+    for (const h of heardBy) note(state, h, `${PERIODS[state.tick]}: heard a scream from the ${roomName(room)}.`);
+    if (heardBy.includes(pid)) beats.push(panel({ mood: 'shock', sfx: 'KYAAAA—', caption: `A scream from the ${roomName(room)}! Then silence.` }));
+  } else if (id === pid) {
+    beats.push(narrate('The soundproofed walls swallow everything. Nobody heard a thing.'));
+  }
+  log(state, `${nameOf(victim)} was murdered in the ${roomName(room)} (Day ${state.day}, ${PERIODS[state.tick]}).`, [id]);
+  return beats;
+}
+
+export function taskProgress(state) {
+  const real = state.order.filter((id) => !['yandere', 'accomplice'].includes(state.chars[id].role) && state.chars[id].alive);
+  const all = real.flatMap((id) => state.chars[id].tasks);
+  return { done: all.filter((t) => t.done).length, total: all.length };
+}
+
+function applyTask(state, id) {
+  const c = state.chars[id];
+  const t = c.tasks.find((x) => !x.done && x.room === c.room);
+  const isPlayer = id === state.playerId;
+  const beats = [];
+  if (!t) return beats;
+  t.done = true;
+  const fake = ['yandere', 'accomplice'].includes(c.role);
+  if (isPlayer) beats.push(narrate(`${t.label}: done.${fake ? ' (Nobody needs to know it was pointless.)' : ''} ${c.tasks.filter((x) => x.done).length}/${c.tasks.length} tasks.`));
+  if (!fake && c.tasks.every((x) => x.done)) {
+    // Reward: a genuine lead on the killer.
+    const y = state.plot.yandere;
+    const trait = chance(state, 0.5) ? 'hair' : 'build';
+    const value = CHAR_BY_ID[y][trait];
+    const ev = addEvidence(state, { kind: 'lead', trait, value, strength: 15, night: state.day, where: null,
+      text: `While doing chores, ${nameOf(id)} found a torn uniform button and a note: the one hunting people here has ${TRAIT_TEXT[trait][value]}.` });
+    learn(state, id, ev);
+    if (isPlayer) beats.push(panel({ mood: 'shock', sfx: '*CLUE!*', caption: `All your tasks are done. ${ev.text}`, icon: 'page' }));
+  }
+  const prog = taskProgress(state);
+  if (!state.powerRestored && prog.total && prog.done >= prog.total) {
+    state.powerRestored = true;
+    const build = CHAR_BY_ID[state.plot.yandere].build;
+    const ev = addEvidence(state, { kind: 'camera', trait: 'build', value: build, strength: 25, night: state.day, where: null,
+      text: `Power restored! The backup camera drive shows the killer's silhouette: ${TRAIT_TEXT.build[build]}.` });
+    publish(state, ev);
+    beats.push(panel({ mood: 'shock', sfx: '*POWER ON*', caption: `The class finished every task. ${ev.text}`, icon: 'camera' }));
+    log(state, 'All tasks finished: the power is back on.');
+  }
+  return beats;
+}
+
+function applyRoomAction(state, id) {
+  const c = state.chars[id];
+  const a = roomAction(state, id);
+  const isPlayer = id === state.playerId;
+  const beats = [];
+  const out = (b) => { if (isPlayer) beats.push(b); };
+  if (!a.ok) { out(narrate(a.reason)); return beats; }
+  switch (a.id) {
+    case 'research': {
+      c.researchedDay = state.day;
+      const pool = activeIds(state).filter((o) => o !== id && o !== state.plot.yandere && !c.cleared.includes(o));
+      const x = pick(state, pool);
+      if (!x) { out(narrate('The archive has nothing new on anyone.')); break; }
+      c.cleared.push(x);
+      bump(c.suspicion, x, -40);
+      note(state, id, `Archive: ${nameOf(x)} is NOT the Obsessive.`);
+      out(panel({ mood: 'neutral', sfx: '*RUSTLE*', caption: `An old diary, a class photo, an alibi that checks out: ${CHAR_BY_ID[x].name} is NOT the Obsessive.`, cast: [{ id: x, expr: 'happy' }] }));
+      break;
+    }
+    case 'cameras': {
+      const rooms = Object.fromEntries(activeIds(state).map((o) => [o, state.chars[o].room]));
+      c.camSnapshot = { day: state.day, tick: state.tick, rooms };
+      const cams = state.evidence.filter((e) => e.kind === 'camera' && !e.destroyed);
+      cams.forEach((e) => learn(state, id, e));
+      const where = ROOMS.map((r) => {
+        const who = Object.keys(rooms).filter((o) => rooms[o] === r.id && o !== id);
+        return `${r.name}: ${who.length ? who.map(nameOf).join(', ') : '—'}`;
+      }).join(' · ');
+      out(panel({ mood: 'dark', sfx: '*BZZT*', caption: `Live feed — ${where}.${cams.length ? ' ' + cams.map((e) => e.text).join(' ') : ''}` }));
+      break;
+    }
+    case 'rehearse': {
+      const others = occupants(state, c.room).filter((o) => o !== id);
+      others.forEach((o) => trustBump(state, o, id, 8));
+      out(panel({ mood: 'pink', sfx: '*LA LA LA*', caption: `You play together until everyone is laughing. ${others.map(nameOf).join(', ')} trust you more.`, cast: others.map((o) => ({ id: o, expr: 'happy' })) }));
+      break;
+    }
+    case 'wash': {
+      const was = c.bloody;
+      c.bloody = false;
+      c.sanity = clamp(c.sanity + 15);
+      out(narrate(was ? 'You scrub until the water runs clear. Nobody will ever know. (+15 sanity)' : 'Cold water, a quiet cot. You feel steadier. (+15 sanity)'));
+      break;
+    }
+    case 'bell': {
+      c.usedBell = true;
+      state.pendingMeeting = { caller: id };
+      out(panel({ mood: 'shock', sfx: '*DONG DONG DONG*', caption: 'You ring the bell. Everyone will gather for an emergency Class Trial at the end of this turn.' }));
+      log(state, `${nameOf(id)} rang the emergency bell.`);
+      break;
+    }
+    case 'lock': {
+      c.usedLock = true;
+      c.barricadeDay = state.day;
+      out(narrate('You drag a dresser in front of your door in the Dorm Hall. Tonight you sleep here, and nobody gets in.'));
+      break;
+    }
+    default:
+      break;
+  }
+  return beats;
+}
+
 function endTick(state) {
   const beats = [];
   const p = state.plot;
@@ -573,7 +824,45 @@ function endTick(state) {
       }
     }
   }
+  // Bloodstains get noticed.
+  for (const b of activeIds(state)) {
+    if (!state.chars[b].bloody) continue;
+    for (const w of occupants(state, state.chars[b].room)) {
+      if (w === b || state.chars[w].role === 'accomplice' || state.chars[w].role === 'yandere') continue;
+      if (state.evidence.some((e) => e.kind === 'blood' && e.subject === b && e.knownBy.includes(w) && e.night === state.day)) continue;
+      if (!chance(state, 0.55)) continue;
+      const ev = addEvidence(state, { kind: 'blood', subject: b, strength: 40, night: state.day, where: null,
+        text: `${nameOf(w)} noticed dark red stains on ${nameOf(b)}'s sleeve (Day ${state.day}, ${roomName(state.chars[b].room)}).` });
+      learn(state, w, ev);
+      if (w === state.playerId) beats.push(panel({ mood: 'shock', sfx: '!?', caption: `Is that… blood? There are dark red stains on ${nameOf(b)}'s sleeve.`, cast: [{ id: b, expr: 'suspicious' }] }));
+      if (b === state.playerId) beats.push(narrate(`${nameOf(w)}'s eyes flick to your sleeve. They saw the blood.`));
+    }
+  }
+  if (state.alarm && state.alarm.tick < state.tick) state.alarm = null;
+  state.history.push({ day: state.day, tick: state.tick, rooms: Object.fromEntries(activeIds(state).map((o) => [o, state.chars[o].room])) });
   state.tick += 1;
+
+  // Bodies are reported by the first innocent to walk in.
+  for (const body of state.bodies) {
+    if (body.found) continue;
+    const finders = occupants(state, body.room).filter((o) => o !== body.killer);
+    if (!finders.length) continue;
+    body.found = true;
+    const finder = finders[0];
+    const clue = findable(state, body.room, finder)[0];
+    beats.push(sceneBeat(body.victim, body.room, `${nameOf(finder)} found ${CHAR_BY_ID[body.victim].name}'s body in the ${roomName(body.room)}. They were ${ROLES[state.chars[body.victim].role].name}.`));
+    if (clue) { publish(state, clue); beats.push(narrate(`At the scene: ${clue.text}`)); }
+    log(state, `${nameOf(finder)} found ${nameOf(body.victim)}'s body in the ${roomName(body.room)}.`);
+    if (gameShouldEnd(state)) { beats.push(...endGame(state)); return beats; }
+    beats.push(...beginTrial(state, { emergency: true, reason: `${nameOf(finder)} reported a body!` }));
+    return beats;
+  }
+  if (state.pendingMeeting) {
+    const caller = state.pendingMeeting.caller;
+    state.pendingMeeting = null;
+    beats.push(...beginTrial(state, { emergency: true, reason: `${nameOf(caller)} rang the emergency bell!` }));
+    return beats;
+  }
   if (state.tick >= state.ticksPerDay) beats.push(...beginTrial(state));
   return beats;
 }
@@ -581,13 +870,13 @@ function endTick(state) {
 // ---------------------------------------------------------------------------
 // Class Trial
 
-function beginTrial(state) {
+function beginTrial(state, { emergency = false, reason = '' } = {}) {
   state.phase = 'trial';
-  const final = state.day >= state.maxDay;
-  state.trial = { day: state.day, final, presented: 0, accused: false, votes: null, result: null };
+  const final = state.day >= state.maxDay && state.tick >= state.ticksPerDay;
+  state.trial = { day: state.day, final, emergency, presented: 0, accused: false, votes: null, result: null };
   const beats = [panel({
-    mood: 'trial', sfx: final ? 'FINAL TRIAL' : 'CLASS TRIAL',
-    caption: final ? 'The storm breaks at dawn. This is the last chance to name the Obsessive.' : 'Everyone gathers in the lecture hall. Nobody sits down.',
+    mood: 'trial', sfx: emergency ? 'EMERGENCY TRIAL' : final ? 'FINAL TRIAL' : 'CLASS TRIAL',
+    caption: emergency ? `${reason} Everyone is dragged to the lecture hall.` : final ? 'The storm breaks at dawn. This is the last chance to name the Obsessive.' : 'Everyone gathers in the lecture hall. Nobody sits down.',
     cast: activeIds(state).map((id) => ({ id, expr: 'suspicious' })),
   })];
   for (const id of state.order) {
@@ -600,24 +889,20 @@ function beginTrial(state) {
       beats.push(line(id, 'suspicious', `I found something. ${ev.text}`));
     }
     if (st.accuse) beats.push(...accusation(state, id, st.accuse));
-    else if (!st.present.length) beats.push(line(id, 'sad', pick(state, ['I don\'t know who to trust anymore…', 'I have nothing. I just want to go home.', 'Let\'s not do anything we\'ll regret.'])));
+    else if (!st.present.length) beats.push(line(id, 'sad', voiceLine(state, id, 'idle')));
   }
   return beats;
 }
 
 function accusation(state, speaker, accused) {
   const beats = [panel({ mood: 'shock', sfx: 'I ACCUSE YOU!', caption: `${nameOf(speaker)} points at ${nameOf(accused)}.`, cast: [{ id: speaker, expr: 'suspicious' }, { id: accused, expr: 'shocked' }] })];
+  if (speaker !== state.playerId) beats.push(line(speaker, 'suspicious', voiceLine(state, speaker, 'accuse', { x: nameOf(accused) })));
   for (const l of activeIds(state)) {
     if (l === speaker || l === accused) continue;
     bump(state.chars[l].suspicion, accused, 6 * (state.chars[l].trust[speaker] / 50));
   }
   trustBump(state, accused, speaker, -15);
-  if (accused !== state.playerId) {
-    const guilty = state.chars[accused].role === 'yandere';
-    beats.push(line(accused, guilty ? 'yandere' : 'shocked', guilty
-      ? pick(state, ['Me? Ahaha… why would I ever hurt anyone?', 'You\'re wasting everyone\'s time.'])
-      : pick(state, ['That\'s insane! I was nowhere near there!', 'You\'re just trying to save yourself!'])));
-  }
+  if (accused !== state.playerId) beats.push(line(accused, 'shocked', voiceLine(state, accused, 'defend')));
   return beats;
 }
 
@@ -630,10 +915,7 @@ export function presentEvidence(state, evId) {
   publish(state, ev);
   const matching = activeIds(state).filter((id) => matchesEvidence(id, ev) && id !== state.playerId);
   const beats = [panel({ mood: 'shock', sfx: 'LOOK AT THIS!', caption: ev.text, cast: matching.map((id) => ({ id, expr: 'shocked' })) })];
-  for (const id of matching) {
-    beats.push(line(id, state.chars[id].role === 'yandere' ? 'yandere' : 'shocked',
-      state.chars[id].role === 'yandere' ? 'Hm. Plenty of people fit that description.' : 'That doesn\'t prove anything!'));
-  }
+  for (const id of matching) beats.push(line(id, 'shocked', voiceLine(state, id, 'react')));
   return beats;
 }
 
@@ -676,15 +958,18 @@ export function castVote(state, playerChoice = null) {
     beats.push(panel({
       mood: E.role === 'yandere' ? 'crimson' : 'dark', sfx: 'EXPELLED',
       caption: `${CHAR_BY_ID[expelled].name} is dragged out of the academy into the storm. They were… ${role.name}.`,
-      cast: [{ id: expelled, expr: E.role === 'yandere' ? 'yandere' : 'sad' }],
+      cast: [{ id: expelled, expr: E.role === 'yandere' ? 'yandere' : 'sad' }], reveal: true,
     }));
     log(state, `${nameOf(expelled)} was expelled. They were ${role.name}.`);
   } else {
-    beats.push(panel({ mood: 'dark', sfx: '……', caption: 'No majority. Nobody is expelled. Night falls.' }));
+    beats.push(panel({ mood: 'dark', sfx: '……', caption: 'No majority. Nobody is expelled.' }));
     log(state, 'The trial ended without a verdict.');
   }
   if (state.chars[state.plot.yandere].expelled || state.trial.final || gameShouldEnd(state)) {
     beats.push(...endGame(state));
+  } else if (state.trial.emergency && state.tick < state.ticksPerDay) {
+    state.phase = 'day';
+    beats.push(narrate(`Everyone drifts back to their timetable. It's ${PERIODS[state.tick]} now.`));
   } else {
     beginNight(state);
   }
@@ -702,11 +987,12 @@ function beginNight(state) {
 export function nightOptions(state) {
   const id = state.playerId;
   const c = state.chars[id];
-  const sleep = [c.room];
-  for (const o of state.offers) if (!sleep.includes(o.room)) sleep.push(o.room);
-  const inv = state.invites[id];
+  const barricaded = c.barricadeDay === state.day;
+  const sleep = barricaded ? ['dorm'] : [c.room];
+  if (!barricaded) for (const o of state.offers) if (!sleep.includes(o.room)) sleep.push(o.room);
+  const inv = barricaded ? null : state.invites[id];
   if (inv && !sleep.includes(inv.room)) sleep.push(inv.room);
-  const opts = { sleep, defaultSleep: inv?.room ?? c.room, offers: state.offers.slice(), kill: null, stakeout: null, mustKill: false };
+  const opts = { sleep, barricaded, defaultSleep: barricaded ? 'dorm' : inv?.room ?? c.room, offers: state.offers.slice(), kill: null, stakeout: null, mustKill: false };
   if (!active(state, id)) return opts;
   if (c.role === 'yandere') {
     opts.kill = activeIds(state).filter((o) => o !== id && o !== state.plot.accomplice);
@@ -745,6 +1031,7 @@ export function resolveNight(state, choice = {}) {
     } else {
       rooms[id] = ai.decideNightRoom(state, id);
     }
+    if (state.chars[id].barricadeDay === state.day) rooms[id] = 'dorm';
   }
   // Broken promises cost trust.
   for (const [id, inv] of Object.entries(state.invites)) {
@@ -847,6 +1134,16 @@ function attack(state, y, victim, rooms, report, morning) {
       text: `Security feed, night ${state.day}: a ${build} silhouette crosses the ${roomName(cam)} at 2:13 AM.` });
   }
 
+  if (V.barricadeDay === state.day && !silent) {
+    Y.sanity = clamp(Y.sanity - 10);
+    report.outcome = 'foiled';
+    note(state, victim, `Night ${state.day}: someone tried your barricaded door for a long, long time.`);
+    beats.push(panel({ mood: 'night', sfx: '*RATTLE RATTLE*', caption: y === pid ? `${nameOf(victim)}'s door is barricaded. It won't budge. (Sanity -10)` : victim === pid ? 'The handle turns. The dresser holds. Whoever it is gives up… eventually.' : 'Somewhere, a door handle rattles.' }));
+    morning.push(narrate(`${nameOf(victim)} says someone tried to break into their barricaded room last night.`));
+    log(state, `Night ${state.day}: someone tried to break into ${nameOf(victim)}'s barricaded room.`);
+    return beats;
+  }
+
   const witnesses = activeIds(state).filter((w) => w !== y && w !== victim && w !== p.accomplice && rooms[w] === scene);
   const hasWhistle = V.items.includes('whistle');
   if (witnesses.length || hasWhistle) {
@@ -866,7 +1163,9 @@ function attack(state, y, victim, rooms, report, morning) {
   } else {
     V.alive = false;
     report.outcome = 'killed';
-    state.crimeScenes.push({ night: state.day, room: scene, victim });
+    state.crimeScenes.push({ day: state.day + 1, room: scene, victim });
+    state.bodies.push({ victim, room: scene, day: state.day + 1, killer: y, found: true });
+    Y.bloody = !silent;
     if (victim === p.target) Y.sanity = 100; else Y.sanity = clamp(Y.sanity + 30);
     if (!silent) {
       if (snapped || chance(state, 0.65)) addEvidence(state, { kind: 'hair', trait: 'hair', value: hair, strength: 20, night: state.day, where: scene,
@@ -874,8 +1173,10 @@ function attack(state, y, victim, rooms, report, morning) {
       if (snapped || chance(state, 0.55)) addEvidence(state, { kind: 'footprint', trait: 'build', value: build, strength: 15, night: state.day, where: scene,
         text: `${build === 'tall' ? 'Large' : 'Small'} bloody footprints leading away from the body (${roomName(scene)}).` });
     }
-    beats.push(panel({ mood: 'crimson', sfx: 'SLASH', caption: victim === pid ? 'Everything goes red, then black.' : '', cast: [{ id: victim, expr: 'shocked' }] }));
-    morning.push(panel({ mood: 'shock', sfx: 'KYAAAAA!', caption: `${CHAR_BY_ID[victim].name} was found dead in the ${roomName(scene)}. They were ${ROLES[V.role].name}.`, cast: [{ id: victim, expr: 'dead' }] }));
+    if (y === pid) beats.push(killBeat(y, victim, scene, 'killer'));
+    else if (victim === pid) beats.push(killBeat(y, victim, scene, 'victim'));
+    else beats.push(panel({ mood: 'crimson', sfx: '*SHKK*', caption: 'Somewhere in the dark, something wet hits the floor.' }));
+    morning.push(sceneBeat(victim, scene, `${CHAR_BY_ID[victim].name} was found dead in the ${roomName(scene)}. They were ${ROLES[V.role].name}.`));
     log(state, `Night ${state.day}: ${nameOf(victim)} was murdered in the ${roomName(scene)}.`);
   }
   return beats;
@@ -940,6 +1241,132 @@ export function autoplayStep(state) {
   if (state.phase === 'trial') return castVote(state, null);
   if (state.phase === 'night') return resolveNight(state, {});
   return [];
+}
+
+// ---------------------------------------------------------------------------
+// Player guidance: the start-of-match briefing and per-turn suggestions.
+
+export function briefing(state, id) {
+  const c = state.chars[id];
+  const p = state.plot;
+  const n = nameOf;
+  const common = {
+    yandere: {
+      goal: `Kill ${n(p.target)} and don't get voted out.`,
+      steps: [
+        `First build Obsession to ${STAB_OBSESSION} by staying near ${n(p.beloved)}, your beloved.`,
+        `Then get ${n(p.target)} alone. When you're in a room with only them (your Accomplice ${n(p.accomplice)} doesn't count), a red STAB button appears.`,
+        'Check the timetable in your Notebook. After School, everyone goes to their club room, and most of them are alone there.',
+        'Stabbing leaves you bloody. Anyone who meets you might notice. Go to the Infirmary and Wash Up.',
+        'Screams carry to neighbouring rooms, except from the soundproof Music Room.',
+        'Or strike at night: anyone who ends the day in a room by themselves is exposed.',
+        `More Obsession unlocks Stalk at 50 and Silent Step at 80. Seeing ${n(p.target)} near ${n(p.beloved)} drains your Sanity, and at 0 you snap.`,
+        'At trials, blend in: accuse someone else and vote with the crowd.',
+      ],
+      lose: 'You lose if you are voted out, or if the Final Trial ends with your target still alive.',
+    },
+    accomplice: {
+      goal: `Help ${n(p.yandere)} kill ${n(p.target)} without ${n(p.yandere)} getting voted out.`,
+      steps: [
+        `${n(p.yandere)} is the Obsessive. You win or lose together.`,
+        `You never count as a witness. Lead ${n(p.target)} into a quiet room where ${n(p.yandere)} can find you both, or invite them to spend the night with you.`,
+        'After a murder, go to the crime scene and Cover Up clues before the Detective finds them.',
+        `At trials, blame someone else and never vote for ${n(p.yandere)}.`,
+      ],
+      lose: `You lose if ${n(p.yandere)} is voted out or ${n(p.target)} survives.`,
+    },
+    detective: {
+      goal: 'Work out who the Obsessive is and get them voted out at a trial.',
+      steps: [
+        'Every clue points at hair colour or build. Each fits two students, and two different clues point at exactly one.',
+        'Search crime scenes: you always find the hidden clues there.',
+        'Library: the gossip archive clears one innocent per day. Classroom: the cameras show where everyone is.',
+        'Watch for blood on people\'s sleeves, and for anyone who claims an alibi nobody else confirms.',
+        'At night you can stake out a room. Any attack there fails and you see the attacker.',
+        'Courtyard: ring the bell to call a trial early. At trials, present your clues, accuse, and vote.',
+      ],
+      lose: 'You lose if the Obsessive is never voted out.',
+    },
+    target: {
+      goal: 'Stay alive until the end of the Final Trial on Day 3.',
+      steps: [
+        'Someone wants you dead. They can only strike when nobody else is in the room with you.',
+        'So never be alone. After School your timetable sends you to your club room alone, so think twice about going.',
+        'Before night, invite someone you trust to sleep in the same room, or Barricade yourself in the Dorm Hall once.',
+        'Search the Courtyard for the Emergency Whistle. It stops one attack.',
+        'The note in your locker hints at the killer\'s hair colour. Help vote them out.',
+      ],
+      lose: 'You lose if you are killed or voted out.',
+    },
+    socialite: {
+      goal: `Get ${n(p.frameTarget)} voted out at a trial, whoever the real killer is.`,
+      steps: [
+        `Whisper rumors about ${n(p.frameTarget)} to everyone you meet. Rumors hit harder than normal gossip.`,
+        `Present clues that happen to match ${n(p.frameTarget)}'s hair or build, and accuse them.`,
+        'When suspicion is high, ring the bell in the Courtyard to call a trial right away.',
+        'Don\'t get voted out yourself.',
+      ],
+      lose: `You lose if ${n(p.frameTarget)} is never voted out, or if you are.`,
+    },
+    romantic: {
+      goal: `Get ${n(p.crush)} to trust you to ${ROMANCE_TRUST}, with both of you still alive at the end.`,
+      steps: [
+        `Follow ${n(p.crush)}'s timetable and talk to them. Chat with Blush once their trust is 40 or more.`,
+        'Rehearse together in the Music Room. Find the love letter in the Dorm Hall and give it to them.',
+        'Confess once their trust is 60 or more.',
+        `Someone else is obsessed with ${n(p.crush)}. Flirting in front of them could make you the next victim.`,
+        `Spending nights together keeps ${n(p.crush)} safe too.`,
+      ],
+      lose: `You lose if either of you dies or is voted out, or ${n(p.crush)}'s trust is below ${ROMANCE_TRUST}.`,
+    },
+  }[c.role];
+  return { role: c.role, ...common };
+}
+
+export function hints(state, id) {
+  const c = state.chars[id];
+  const p = state.plot;
+  const out = [];
+  if (!active(state, id) || state.phase !== 'day') return out;
+  const here = occupants(state, c.room).filter((o) => o !== id);
+  const next = PERIODS[state.tick];
+  const sched = (o) => CHAR_BY_ID[o].schedule[state.tick];
+  if (c.role === 'yandere') {
+    const v = stabVictim(state, id);
+    if (v) out.push(`You are alone with ${nameOf(v)}. Stab now, or wait for ${nameOf(p.target)}.`);
+    if (c.obsession < STAB_OBSESSION && active(state, p.beloved)) out.push(`Obsession ${c.obsession}/${STAB_OBSESSION}: stay near ${nameOf(p.beloved)} (now in the ${roomName(state.chars[p.beloved].room)}) to unlock Stab.`);
+    if (c.bloody) out.push('You have blood on you. Get to the Infirmary and Wash Up before anyone notices.');
+    if (state.chars[p.target].alive) {
+      const tr = state.chars[p.target].room;
+      const alone = occupants(state, tr).filter((o) => o !== p.target && o !== p.accomplice).length === 0;
+      if (canSeeRoom(state, id, tr)) out.push(`${nameOf(p.target)} is in the ${roomName(tr)}${alone ? ', alone' : ''}.`);
+      else out.push(`Timetable: ${nameOf(p.target)} should be heading to the ${roomName(sched(p.target))} (${next}).`);
+    }
+    if (c.sanity < 35) out.push('Your Sanity is cracking. Spend time near your beloved, or kill.');
+  }
+  if (c.role === 'target') {
+    if (!here.length) out.push('You are alone. That is exactly what the killer wants. Find people.');
+    if (state.tick >= 2 && !state.invites[id] && c.barricadeDay !== state.day) out.push('Night is coming. Invite someone you trust, or Barricade in the Dorm Hall.');
+  }
+  if (c.role === 'detective' || c.role === 'target' || c.role === 'romantic') {
+    const scene = state.crimeScenes.find((s) => s.day === state.day && findable(state, s.room, id).length);
+    if (scene) out.push(`There may still be clues at the crime scene in the ${roomName(scene.room)}. Search it.`);
+  }
+  if (c.role === 'accomplice') {
+    const scene = state.crimeScenes.find((s) => s.day === state.day && findable(state, s.room, '__nobody__').length);
+    if (scene) out.push(`Clues are still lying around the ${roomName(scene.room)}. Get there and Cover Up.`);
+    if (state.chars[p.target].alive && here.includes(p.target)) out.push(`${nameOf(p.target)} is here. Keep them busy until ${nameOf(p.yandere)} arrives.`);
+  }
+  if (c.role === 'romantic' && active(state, p.crush)) {
+    out.push(here.includes(p.crush) ? `${nameOf(p.crush)} is right here. Talk to them.` : `${nameOf(p.crush)} should be at the ${roomName(sched(p.crush))} (${next}).`);
+  }
+  if (c.role === 'socialite' && active(state, p.frameTarget) && here.length) out.push(`Whisper a rumor about ${nameOf(p.frameTarget)}.`);
+  const task = c.tasks.find((t) => !t.done);
+  if (task && out.length < 3) out.push(c.tasks.some((t) => !t.done && t.room === c.room) ? 'One of your tasks is in this room.' : `Next task: ${task.label} (${roomName(task.room)}).`);
+  const ra = roomAction(state, id);
+  if (ra.ok) out.push(`This room's special action: ${ra.label}.`);
+  if (!out.length) out.push('Move to a neighbouring room, or talk to someone here.');
+  return out.slice(0, 3);
 }
 
 export { ISOLATED_ROOMS, INVITE_TRUST };
